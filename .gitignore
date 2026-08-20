@@ -30,3 +30,8 @@ Thumbs.db
 # === 로그 및 데이터 캐시 파일 (필요 시) ===
 *.log
 data/raw/
+
+# === 데이터베이스 파일 ===
+*.db
+*.sqlite3
+data/
