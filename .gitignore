@@ -1,0 +1,32 @@
+# === 가상환경 ===
+venv/
+.venv/
+env/
+ENV/
+
+# === 보안 및 환경변수 (절대 커밋 금지) ===
+.env
+*.env
+!.env.example
+
+# === 파이썬 빌드 & 캐시 (하위 모든 폴더 적용) ===
+**/__pycache__/
+*.py[cod]
+*$py.class
+build/
+dist/
+*.egg-info/
+
+# === 에디터 및 IDE 설정 ===
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# === OS 임시 파일 ===
+.DS_Store
+Thumbs.db
+
+# === 로그 및 데이터 캐시 파일 (필요 시) ===
+*.log
+data/raw/
