@@ -226,6 +226,31 @@ class DBManager:
                 return True, f"'{stock_name}' 종목이 등록되었습니다."
         except Exception as e:
             return False, f"종목 등록 실패: {e}"
+        
+    def add_portfolio_bulk(self, username: str, items: list[dict]) -> tuple[int, list[str]]:
+        """여러 종목 일괄 등록"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        success_count = 0
+        failed_stocks = []
+
+        for item in items:
+            s_name = item.get("stock_name", "").strip()
+            s_memo = item.get("memo", "대량 일괄 등록").strip()
+            if not s_name:
+                continue
+            try:
+                cursor.execute(
+                    "INSERT INTO portfolios (username, stock_name, memo) VALUES (?, ?, ?)",
+                    (username, s_name, s_memo)
+                )
+                success_count += 1
+            except Exception:
+                failed_stocks.append(s_name)
+
+        conn.commit()
+        conn.close()
+        return success_count, failed_stocks
 
     def get_user_portfolio(self, username: str) -> list[dict]:
         with self._get_connection() as conn:

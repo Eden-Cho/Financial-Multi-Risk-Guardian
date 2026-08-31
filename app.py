@@ -1,177 +1,151 @@
 import os
-import sys
-from typing import Optional
-from fastapi import FastAPI, HTTPException
+import time
+import threading
+from typing import List, Optional
+from pydantic import BaseModel, Field
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-import uvicorn
-
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
 from backend.modules.analyzer import RiskAnalyzer
-from backend.modules.db_manager import DBManager
+from backend.modules.batch_sync import BatchSyncManager
+from backend.modules.storage import StorageManager
 
-app = FastAPI(
-    title="Financial Multi-Risk Guardian API",
-    description="주린이를 위한 주식 다차원 지뢰 진단 백엔드 API",
-    version="1.0.0"
-)
+analyzer = RiskAnalyzer()
+batch_manager = BatchSyncManager()
+storage = StorageManager()
+
+# 422 에러 방지: 프론트엔드의 카멜케이스(userId, stockName) 및 다양한 필드명을 모두 허용
+class WatchlistRequest(BaseModel):
+    user_id: Optional[str] = Field(default="default_user", alias="userId")
+    stock_name: Optional[str] = Field(default=None, alias="stockName")
+    company: Optional[str] = None
+    name: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
+
+    def get_clean_data(self) -> tuple[str, str]:
+        uid = (self.user_id or "default_user").strip()
+        target_stock = self.stock_name or self.company or self.name or ""
+        return uid, target_stock.strip()
+
+def background_startup_task():
+    time.sleep(2.0)
+    batch_manager.sync_financials_for_targets()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    threading.Thread(target=background_startup_task, daemon=True).start()
+    yield
+
+app = FastAPI(title="Financial Risk Guardian API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-risk_analyzer = RiskAnalyzer()
-db_manager = DBManager()
-
-# --- Pydantic 요청 스키마 ---
-class RegisterRequest(BaseModel):
-    username: str
-    nickname: str
-    email: str
-    password: str
-    experience: Optional[str] = "beginner"
-    marketing_agree: Optional[bool] = False
-
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-
-class SocialAuthRequest(BaseModel):
-    social_id: str
-    provider: str
-
-class SocialOnboardingRequest(BaseModel):
-    username: str
-    nickname: str
-    email: str
-    provider: str
-    experience: str
-    marketing_agree: Optional[bool] = False
-
-class WatchlistAddRequest(BaseModel):
-    username: str
-    stock_name: str
-    memo: Optional[str] = "관심 종목"
-
-class WatchlistDeleteRequest(BaseModel):
-    username: str
-    stock_name: str
-
-class InquiryRequest(BaseModel):
-    username: str
-    category: str
-    content: str
-
-# --- 1. 상태 체크 ---
-@app.get("/api/health")
-def health_check():
-    return {"status": "ok", "service": "Financial Multi-Risk Guardian API"}
-
-# --- 2. 인증 & 소셜 온보딩 엔드포인트 ---
-@app.post("/api/auth/register")
-def register(req: RegisterRequest):
-    ok, msg = db_manager.register_user(
-        username=req.username,
-        nickname=req.nickname,
-        email=req.email,
-        password=req.password,
-        role="user",
-        provider="local",
-        experience=req.experience,
-        marketing_agree=req.marketing_agree
-    )
-    if not ok:
-        raise HTTPException(status_code=400, detail=msg)
-    return {"success": True, "message": msg}
-
-@app.post("/api/auth/login")
-def login(req: LoginRequest):
-    user = db_manager.verify_user(req.username, req.password)
-    if user:
+def _process_analysis(target_company: str, quick: bool = False):
+    res = analyzer.analyze(target_company, quick_scan=quick)
+    if not res:
+        return {"error": f"'{target_company}'은(는) 유효하지 않거나 DART에서 찾을 수 없는 기업명입니다."}
+    
+    score_info, radar_df, report_text, overhang_schedule, raw_disclosures, financial_health, cb_dilution, forecast_scenario, sentiment_data, price_info = res
+    
+    if quick:
         return {
-            "success": True, 
-            "username": user["username"], 
-            "nickname": user["nickname"],
-            "email": user["email"],
-            "role": user["role"],
-            "experience": user["experience"],
-            "message": "로그인 성공"
+            "score_info": score_info,
+            "radar_data": radar_df.to_dict(orient="records"),
+            "report_text": report_text,
+            "financial_health": financial_health,
+            "cb_dilution": cb_dilution,
+            "price_info": price_info
         }
-    raise HTTPException(status_code=401, detail="아이디 또는 비밀번호가 올바르지 않습니다.")
-
-@app.post("/api/auth/social-check")
-def social_auth_check(req: SocialAuthRequest):
-    result = db_manager.social_login_or_check(req.social_id, req.provider)
-    return result
-
-@app.post("/api/auth/social-onboarding")
-def social_onboarding_complete(req: SocialOnboardingRequest):
-    ok, result = db_manager.complete_social_onboarding(
-        username=req.username,
-        nickname=req.nickname,
-        email=req.email,
-        provider=req.provider,
-        experience=req.experience,
-        marketing_agree=req.marketing_agree
-    )
-    if not ok:
-        raise HTTPException(status_code=400, detail=str(result))
-    return {"success": True, "user": result}
-
-# --- 3. 종목 정밀 진단 ---
-@app.get("/api/analyze/{stock_name}")
-def analyze_stock(stock_name: str):
-    score_info, radar_df, report_text = risk_analyzer.analyze(stock_name)
-    radar_data = radar_df.to_dict(orient="records")
+        
     return {
-        "stock_name": stock_name,
         "score_info": score_info,
-        "radar_data": radar_data,
-        "report_text": report_text
+        "radar_data": radar_df.to_dict(orient="records"),
+        "report_text": report_text,
+        "overhang_schedule": overhang_schedule,
+        "raw_disclosures": raw_disclosures,
+        "financial_health": financial_health,
+        "cb_dilution": cb_dilution,
+        "forecast_scenario": forecast_scenario,
+        "sentiment_data": sentiment_data,
+        "price_info": price_info
     }
 
-# --- 4. 관심 종목 ---
-@app.get("/api/watchlist/{username}")
-def get_watchlist(username: str):
-    items = db_manager.get_user_portfolio(username)
-    return {"watchlist": items}
+# 1. 심층 분석: Query String 및 Path Parameter 둘 다 지원
+@app.get("/api/analyze")
+def analyze_stock_query(company: str = Query(..., description="분석할 회사명")):
+    return _process_analysis(company, quick=False)
 
+@app.get("/api/analyze/{company}")
+def analyze_stock_path(company: str):
+    return _process_analysis(company, quick=False)
+
+# 2. 경량 분석: Query String 및 Path Parameter 둘 다 지원
+@app.get("/api/quick_scan")
+def quick_scan_query(company: str = Query(..., description="경량 분석할 회사명")):
+    return _process_analysis(company, quick=True)
+
+@app.get("/api/quick_scan/{company}")
+def quick_scan_path(company: str):
+    return _process_analysis(company, quick=True)
+
+# 3. 사용자별 관심 종목 등록 (422 방지 처리 완료)
 @app.post("/api/watchlist/add")
-def add_watchlist(req: WatchlistAddRequest):
-    ok, msg = db_manager.add_portfolio_item(req.username, req.stock_name, memo=req.memo)
-    if not ok:
-        raise HTTPException(status_code=400, detail=msg)
-    return {"success": True, "message": msg}
+def add_watchlist(req: WatchlistRequest, background_tasks: BackgroundTasks):
+    user_id, stock_name = req.get_clean_data()
+    if not stock_name:
+        return {"status": "ERROR", "message": "종목명이 누락되었습니다."}
+        
+    storage.add_watchlist_item(user_id, stock_name)
+    background_tasks.add_task(batch_manager.sync_financials_for_targets, [stock_name])
+    return {"status": "SUCCESS", "message": f"'{stock_name}' 관심 종목 등록 완료"}
 
-@app.delete("/api/watchlist/delete")
-def delete_watchlist(req: WatchlistDeleteRequest):
-    ok, msg = db_manager.remove_portfolio_item(req.username, req.stock_name)
-    if not ok:
-        raise HTTPException(status_code=400, detail=msg)
-    return {"success": True, "message": msg}
+# 4. 사용자별 관심 종목 해제 (422 방지 처리 완료)
+@app.post("/api/watchlist/remove")
+def remove_watchlist(req: WatchlistRequest):
+    user_id, stock_name = req.get_clean_data()
+    if not stock_name:
+        return {"status": "ERROR", "message": "종목명이 누락되었습니다."}
+        
+    storage.remove_watchlist_item(user_id, stock_name)
+    return {"status": "SUCCESS", "message": f"'{stock_name}' 관심 종목 삭제 완료"}
 
-# --- 5. 관리자 & 문의사항 엔드포인트 ---
-@app.post("/api/inquiry/create")
-def create_inquiry(req: InquiryRequest):
-    ok, msg = db_manager.create_inquiry(req.username, req.category, req.content)
-    if not ok:
-        raise HTTPException(status_code=400, detail=msg)
-    return {"success": True, "message": msg}
+# 5. 사용자별 관심 종목 목록 및 일괄 안전도 상태 조회
+@app.get("/api/watchlist")
+def get_watchlist(user_id: str = Query(default="default_user", description="사용자 ID")):
+    stocks = storage.get_user_watchlist(user_id)
+    results = []
+    for stock in stocks:
+        res = analyzer.analyze(stock, quick_scan=True)
+        if res:
+            score_info, _, _, _, _, _, _, _, _, price_info = res
+            results.append({
+                "stock_name": stock,
+                "score": score_info["score"],
+                "status": score_info["status"],
+                "current_price": price_info.get("current_price", "-"),
+                "change_str": price_info.get("change_str", "-")
+            })
+    return {"user_id": user_id, "items": results}
 
-@app.get("/api/admin/users")
-def get_admin_users():
-    users = db_manager.get_all_users_for_admin()
-    return {"users": users}
+# 6. DART 공시 3줄 요약
+@app.get("/api/disclosure/summary")
+def get_disclosure_summary(report_nm: str = Query(...), rcept_no: str = Query("")):
+    return analyzer.summarize_disclosure(report_nm, rcept_no)
 
-@app.get("/api/admin/inquiries")
-def get_admin_inquiries():
-    inquiries = db_manager.get_all_inquiries()
-    return {"inquiries": inquiries}
+# 7. 수동 배치 동기화 트리거
+@app.post("/api/admin/sync_financials")
+def trigger_financial_sync(background_tasks: BackgroundTasks):
+    background_tasks.add_task(batch_manager.sync_financials_for_targets)
+    return {"status": "SUCCESS", "message": "동기화 작업이 백그라운드에서 시작되었습니다."}
 
 if __name__ == "__main__":
-    uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=True)
+    import uvicorn
+    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=False)
