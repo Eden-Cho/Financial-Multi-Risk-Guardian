@@ -1,0 +1,41 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: guardian-backend
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - DART_API_KEY=${DART_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - HF_TOKEN=${HF_TOKEN:-}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-guardian-risk-secret-key-production-2026}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
+      - LANGFUSE_HOST=${LANGFUSE_HOST:-}
+    volumes:
+      - ./backend/risk_guardian.db:/app/risk_guardian.db
+      - ./backend/data:/app/data
+    networks:
+      - guardian-net
+
+  frontend:
+    build:
+      context: ./frontend-web
+      dockerfile: Dockerfile
+    container_name: guardian-frontend
+    restart: always
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    environment:
+      - NODE_ENV=production
+    networks:
+      - guardian-net
+
+networks:
+  guardian-net:
+    driver: bridge

@@ -1,124 +1,107 @@
-# 🛡️ Financial Multi-Risk Guardian (금융 다차원 리스크 가디언)
-> **"주린이를 위한 DART 공시 기반 다차원 지뢰 탐지 & 뇌동매매 방지 비서"**
+# 🛡️ Financial Risk Guardian (K-Stock Risk Radar)
+
+> **DART 전자공시 & 재무 데이터 기반 상장유지/오버행 리스크 조기 감지 및 초개인화 AI 포트폴리오 관제 솔루션**
+
+대한민국 주식 시장(코스피/코스닥)의 상장폐지 요건(자본잠식, 연속적자), 메자닌 채권(CB/BW) 희석 리스크, 지배구조 이상 징후를 실시간으로 탐지하고, **Gemini AI 정밀 소견서**와 **KR-FinBERT 공시 감성 지표**를 제공합니다.
 
 ---
 
-## 📌 1. 프로젝트 개요 (Overview)
+## 🌟 핵심 기능 (Key Features)
 
-개인 투자자(주린이)가 유튜브, SNS, 급등 뉴스에 현혹되어 **매수 버튼을 누르기 직전**, 해당 기업의 잠재적 리스크(전환사채 오버행, 유상증자, 감자, 관리종목 지정 징후 등)를 실시간으로 탐지하고 AI 진단 소견서를 제공하여 **뇌동매매를 방지하고 투자자를 보호하는 풀스택 핀테크 솔루션**입니다.
+1. **하이브리드 캐시 & 스마트 무효화 (Smart Invalidation)**
+   * **초고속 응답 (0.01s ~ 0.2s)**: 기존 분석 결과와 기초 재무는 SQLite 로컬 공유 DB를 통해 즉각 반환.
+   * **돌발 악재 실시간 감지**: DART 최신 접수번호(rcept_no) 및 긴급 위험 공시(횡령/배임, 감사의견, CB 발행 등)를 실시간 대조하여 악재 발생 시에만 즉각 Gemini 재호출 & DB 자동 갱신.
 
-* **타깃 사용자:** 공시 해석이 어려운 개인 초보 투자자
-* **핵심 가치:** 
-  1. **정보 비대칭 해소:** 복잡한 DART 전자공시 데이터의 직관적 시각화
-  2. **Security-First:** 금융 및 개인정보 비식별화(Anonymizer) 파이프라인 탑재
-  3. **실시간 리스크 감시:** 관심 종목 일괄 지뢰 스캔 및 긴급 공시 이메일 알림 연동 체계 구축
+2. **합집합(Union) 배치 동기화 & 공유 저장소**
+   * 사용자별 관심 종목(Watchlist)을 취합하여 **고유 종목의 합집합(Deduplication)**을 자동 도출.
+   * DART API 호출 제한(Rate Limit)을 극대화하여 절약하면서, 여러 사용자가 동일 종목을 공유 캐시로 즉시 조회.
 
----
+3. **다차원 리스크 정량 진단 (5-Axis Radar)**
+   * 상장유지 리스크 (자본잠식률, 영업손실 연속성)
+   * 잠재물량 부담 (CB/BW/유상증자 오버행 일정)
+   * 지배구조 변동성 (최대주주 변경, 임원 블록딜)
+   * 재무 부실도 & 사채 희석률
 
-## 🏗️ 2. 시스템 아키텍처 (System Architecture)
-
-```
-[ DART Open API ] ──┐
-                     ├──▶ [ Data Pipeline ] ──▶ [ Security Anonymizer ]
-[ Naver News API ] ──┘                              │ (개인정보/식별자 마스킹)
-                                                    ▼
-                                         [ Multi-Risk Analyzer ]
-                                          - CB/BW 오버행 분석
-                                          - 재무/공시 건전성 진단
-                                          - Safety Score & 레이더 차트 산출
-                                                    │
-                                                    ▼
-                                          [ FastAPI REST Backend ]
-                                          - 사용자 인증 & 소셜 온보딩
-                                          - 포트폴리오(Watchlist) 관리
-                                          - 피드백/문의 및 관리자 센터
-                                                    │
-                                                    ▼
-                                      [ Next.js Modern Frontend ]
-                                      - 반응형 대시보드 & 레이더 차트
-                                      - 상용 앱 스타일 온보딩 & 약관 모달
-```
+4. **생성형 AI & 특화 NLP 심층 리포트**
+   * **Gemini Flash 기반 정밀 분석**: 초보 투자자 관점의 1줄 액션 가이드, 3~6개월 시나리오 예측.
+   * **KR-FinBERT 금융 감성 분석**: 금융감독원 공시 문장의 긍정/부정/중립 여론 지수화.
+   * **Langfuse 관제**: LLM 레이턴시, 토큰 소모량, 파이프라인 전체 추적(Observability).
 
 ---
 
-## ⚡ 3. 핵심 기능 (Key Features)
+## 🏗️ 시스템 아키텍처 (System Architecture)
 
-### 🔍 1) 단일 종목 다차원 지뢰 진단
-* **Safety Score (0~100점):** 공시 및 뉴스 리스크 키워드 가중치 기반 안전 점수 산출
-* **다차원 리스크 지형도 (Radar Chart):** 전환사채(CB), 유상증자, 지배구조 리스크 등을 다각도로 가시화
-* **AI 진단 소견서:** 초보자도 이해하기 쉬운 요약형 리스크 브리핑 리포트 자동 생성
-
-### ⭐ 2) 관심 종목 가디언 (Watchlist) & 일괄 스캔
-* 매수를 고민 중인 종목들을 장바구니처럼 담아두고 투자 메모 관리
-* **원클릭 일괄 지뢰 탐지:** 담아둔 모든 종목의 공시 악재를 백엔드에서 병렬 분석하여 안전도 카드 제공
-
-### 🔐 3) 상용 앱 수준의 인증 & 온보딩 플로우
-* **소셜 간편로그인(카카오/네이버/구글) & 온보딩:** 최초 소셜 가입 시 닉네임, 알림용 이메일, 투자 경험을 받는 2단계 온보딩 지원
-* **법적 동의 체계 준수:** 개인정보 보호법 및 정보통신망법에 맞춘 이용약관(AI 면책 조항) 및 긴급 공시 알림 동의 팝업 제공
-
-### ⚙️ 4) 관리자 센터 (Admin / Master)
-* `master` / `admin` 전용 권한 분기
-* 전체 회원 현황(가입 경로, 투자 경험, 관심종목 수, 마케팅 동의 여부) 및 사용자 문의/피드백 실시간 모니터링
+[사용자 검색 / 관심 종목 요청]
+          │
+          ├── 1. [로컬 SQLite 공유 DB] 기초 재무 및 이전 분석 캐시 확인 (0.001s)
+          │
+          ├── 2. [DART API] 실시간 최신 공시 접수번호 및 긴급 악재 키워드 검사 (0.2s)
+          │
+          └── 3. [조건부 파이프라인 분기]
+                  ├─ [안전 / 캐시 유효] ──► 실시간 시세 결합 후 즉시 반환 (0.01s)
+                  └─ [돌발 악재 / 신규] ──► Gemini 분석 ──► DB 스냅샷 갱신 ──► 결과 반환
 
 ---
 
-## 🛠️ 4. 기술 스택 (Tech Stack)
+## 📁 프로젝트 구조 (Project Structure)
 
-### Backend
-* **Language / Framework:** Python 3.11+, FastAPI, Uvicorn
-* **Database:** SQLite (Native connection)
-* **Data & AI Engine:** DART Open API, Pandas, Regex Anonymizer, Scikit-learn
-
-### Frontend
-* **Framework:** Next.js 16 (App Router), TypeScript
-* **Styling:** Tailwind CSS, Lucide React (Icons)
-* **Data Visualization:** Recharts (Radar / Responsive Chart)
-* **HTTP Client:** Axios
+├── backend/
+│   ├── modules/
+│   │   ├── analyzer.py           # 스마트 캐시 분기 & 다차원 리스크 판정 엔진
+│   │   ├── batch_sync.py         # 관심종목 합집합 도출 및 DART 배치 동기화
+│   │   ├── storage.py            # SQLite 기반 재무/리포트/관심종목 공유 DB 관리자
+│   │   ├── dart_collector.py     # DART Open API 연동 및 고유번호/공시 수집기
+│   │   ├── price_collector.py    # 네이버 금융 실시간 시세 및 우선주 괴리율 파서
+│   │   └── sentiment_analyzer.py # snunlp/KR-FinBert-SC 기반 감성 분석기
+├── frontend/                     # Next.js 14 기반 대시보드 UI
+├── app.py                        # FastAPI 백엔드 서버 & RESTful API
+├── .env.example                  # 환경 변수 템플릿
+├── requirements.txt              # 백엔드 의존성 패키지 목록
+└── README.md
 
 ---
 
-## 🚀 5. 시작 가이드 (Getting Started)
+## 🚀 빠른 시작 가이드 (Getting Started)
 
-### 1) 저장소 클론 및 가상환경 설정
-```powershell
-git clone [https://github.com/your-repo/Financial-Multi-Risk-Guardian.git](https://github.com/your-repo/Financial-Multi-Risk-Guardian.git)
-cd Financial-Multi-Risk-Guardian
+### 1. 환경 변수 설정
+프로젝트 루트에 .env 파일을 생성하고 발급받은 API 키를 입력합니다.
 
-# Python 가상환경 생성 및 패키지 설치
-python -m venv venv
-./venv/Scripts/Activate.ps1
+DART_API_KEY=your_dart_api_key_here
+GEMINI_API_KEY=your_gemini_api_key_here
+
+# Langfuse LLM 관제 (선택 사항)
+LANGFUSE_PUBLIC_KEY=your_langfuse_public_key
+LANGFUSE_SECRET_KEY=your_langfuse_secret_key
+LANGFUSE_HOST=[https://cloud.langfuse.com](https://cloud.langfuse.com)
+
+### 2. 백엔드(FastAPI) 실행
+# 가상환경 활성화 후 의존성 설치
 pip install -r requirements.txt
-```
 
-### 2) 백엔드(FastAPI) 실행
-```powershell
-# 프로젝트 루트 디렉토리에서 실행
+# 서버 실행 (포트: 8000)
 python app.py
-```
-> 백엔드 서버: `http://127.0.0.1:8000` (API Docs: `http://127.0.0.1:8000/docs`)
 
-### 3) 프론트엔드(Next.js) 실행
-```powershell
-# 새 터미널 창에서 실행
-cd frontend-web
+### 3. 프론트엔드(Next.js) 실행
+cd frontend
 npm install
 npm run dev
-```
-> 웹 대시보드: `http://localhost:3000`
+# http://localhost:3000 접속
 
 ---
 
-## 🧪 6. 테스트 계정 안내 (Demo Accounts)
+## 🔌 주요 API 명세 (API Endpoints)
 
-| 권한 | 아이디 | 비밀번호 | 닉네임 | 비고 |
-| :--- | :--- | :--- | :--- | :--- |
-| **Master** | `master` | `master1234` | 총괄마스터 | 관리자 센터 전체 권한 |
-| **Admin** | `admin` | `admin1234` | 운영관리자 | 회원/문의 모니터링 |
-| **User** | `tester1` | `tester1234` | 성투하는라이언 | 샘플 관심종목(모아데이타, 카카오) 탑재 |
-| **User** | `tester2` | `tester1234` | 주식꿈나무 | 샘플 관심종목(삼성전자) 탑재 |
+| Method | Endpoint | 설명 |
+|---|---|---|
+| GET | /api/analyze?company={name} | 특정 종목 다차원 심층 분석 (스마트 캐시 적용) |
+| GET | /api/quick_scan?company={name} | 일괄 진단용 경량 스캔 |
+| GET | /api/watchlist?user_id={id} | 사용자 등록 관심 종목 리스트 및 일괄 안전도 조회 |
+| POST | /api/watchlist/add | 관심 종목 등록 (백그라운드 동기화 큐 적재) |
+| POST | /api/watchlist/remove | 관심 종목 해제 |
+| GET | /api/disclosure/summary | 개별 공시 보고서 3줄 AI 요약 및 행동 가이드 |
+| POST | /api/admin/sync_financials | 관심 종목 합집합 재무제표 수동 배치 동기화 트리거 |
 
 ---
 
-## 📜 7. 법적 고지 (Disclaimer)
-
-본 서비스가 제공하는 모든 점수(Safety Score), 지표 및 AI 리포트는 투자 판단을 돕기 위한 **단순 참고용 자료**이며, 특정 금융투자상품의 매수/매도를 추천하거나 원금을 보장하지 않습니다. 최종 투자 결정과 손익에 대한 모든 책임은 투자자 본인에게 있습니다.
+## 🛡️ 라이선스 (License)
+This project is licensed under the MIT License.

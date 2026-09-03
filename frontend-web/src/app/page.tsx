@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import axios from "axios";
 import Link from "next/link";
 import { 
@@ -10,7 +10,6 @@ import {
   Plus, 
   Trash2, 
   RefreshCw, 
-  Eye, 
   Lock, 
   User, 
   ShieldCheck, 
@@ -41,7 +40,9 @@ import {
   Crown,
   CheckCircle2,
   ChevronRight,
-  ArrowRightLeft
+  ArrowRightLeft,
+  Clock,
+  KeyRound
 } from "lucide-react";
 import {
   Radar,
@@ -52,24 +53,49 @@ import {
   ResponsiveContainer
 } from "recharts";
 
-const API_BASE = "http://127.0.0.1:8000/api";
+const API_BASE = typeof window !== "undefined" ? "/api" : "http://localhost:8000/api";
+
+// JWT Access Token 자동 주입 인터셉터
+if (typeof window !== "undefined") {
+  axios.interceptors.request.use((config) => {
+    const token = localStorage.getItem("access_token");
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+    return config;
+  });
+}
 
 interface WatchItem {
-  id: number;
   stock_name: string;
-  memo: string;
-  created_at: string;
+  score: number;
+  status: string;
+  current_price: string;
+  change_str: string;
+}
+
+interface ToastInfo {
+  message: string;
+  type: "success" | "error" | "info";
 }
 
 export default function Home() {
-  const [currentUser, setCurrentUser] = useState<string>("tester1");
-  const [currentNickname, setCurrentNickname] = useState<string>("주린이탈출");
+  const [currentUser, setCurrentUser] = useState<string>("");
+  const [currentNickname, setCurrentNickname] = useState<string>("");
   const [userRole, setUserRole] = useState<string>("user");
   const [isAuthOpen, setIsAuthOpen] = useState<boolean>(false);
   
   const [authId, setAuthId] = useState("");
   const [authPw, setAuthPw] = useState("");
   const [authMsg, setAuthMsg] = useState("");
+
+  // 계정 찾기 모달 상태
+  const [isAccountRecoveryOpen, setIsAccountRecoveryOpen] = useState(false);
+  const [recoveryTab, setRecoveryTab] = useState<"findId" | "resetPw">("findId");
+  const [recoveryEmail, setRecoveryEmail] = useState("");
+  const [recoveryId, setRecoveryId] = useState("");
+  const [recoveryNewPw, setRecoveryNewPw] = useState("");
+  const [recoveryResultMsg, setRecoveryResultMsg] = useState<{ text: string; isError: boolean } | null>(null);
 
   const [isOnboarding, setIsOnboarding] = useState(false);
   const [socialProvider, setSocialProvider] = useState<"kakao" | "naver" | "google">("kakao");
@@ -94,14 +120,23 @@ export default function Home() {
   const [activeTab, setActiveTab] = useState<"analyze" | "watchlist" | "inquiry" | "admin">("analyze");
 
   const [searchStock, setSearchStock] = useState("삼성전자");
+  const [recentSearches, setRecentSearches] = useState<string[]>([]);
   const [analyzing, setAnalyzing] = useState(false);
   const [analysisResult, setAnalysisResult] = useState<any>(null);
 
   const [watchlist, setWatchlist] = useState<WatchItem[]>([]);
+  const [watchlistLoading, setWatchlistLoading] = useState(false);
   const [newStockName, setNewStockName] = useState("");
-  const [newStockMemo, setNewStockMemo] = useState("");
-  const [batchResults, setBatchResults] = useState<any[]>([]);
-  const [batchLoading, setBatchLoading] = useState(false);
+  const [addingStock, setAddingStock] = useState(false);
+
+  const [toast, setToast] = useState<ToastInfo | null>(null);
+
+  const showToast = (message: string, type: "success" | "error" | "info" = "info") => {
+    setToast({ message, type });
+    setTimeout(() => {
+      setToast(null);
+    }, 3000);
+  };
 
   const [inqCategory, setInqCategory] = useState("기능 문의");
   const [inqContent, setInqContent] = useState("");
@@ -109,6 +144,31 @@ export default function Home() {
 
   const [adminUsers, setAdminUsers] = useState<any[]>([]);
   const [adminInquiries, setAdminInquiries] = useState<any[]>([]);
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("recent_searches");
+      if (saved) {
+        setRecentSearches(JSON.parse(saved));
+      }
+    } catch (e) {}
+  }, []);
+
+  useEffect(() => {
+    if (currentUser) {
+      fetchWatchlist(currentUser);
+    } else {
+      setWatchlist([]);
+    }
+  }, [currentUser]);
+
+  const saveRecentSearch = (stock: string) => {
+    const updated = [stock, ...recentSearches.filter(s => s !== stock)].slice(0, 5);
+    setRecentSearches(updated);
+    try {
+      localStorage.setItem("recent_searches", JSON.stringify(updated));
+    } catch (e) {}
+  };
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -119,16 +179,60 @@ export default function Home() {
         password: authPw
       });
       if (res.data.success) {
+        if (res.data.token) {
+          localStorage.setItem("access_token", res.data.token);
+        }
         setCurrentUser(authId);
         setCurrentNickname(res.data.nickname || authId);
         setUserRole(res.data.role || "user");
         setIsAuthOpen(false);
         setAuthId("");
         setAuthPw("");
+        showToast(`${res.data.nickname || authId}님 환영합니다!`, "success");
         fetchWatchlist(authId);
       }
     } catch (err: any) {
       setAuthMsg(err.response?.data?.detail || "아이디 또는 비밀번호가 올바르지 않습니다.");
+    }
+  };
+
+  // 아이디 찾기 요청
+  const handleFindId = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setRecoveryResultMsg(null);
+    try {
+      const res = await axios.post(`${API_BASE}/auth/find-id`, { email: recoveryEmail });
+      if (res.data.success) {
+        setRecoveryResultMsg({
+          text: `가입된 계정 아이디: ${res.data.masked_id}`,
+          isError: false
+        });
+      } else {
+        setRecoveryResultMsg({ text: res.data.message, isError: true });
+      }
+    } catch (err: any) {
+      setRecoveryResultMsg({ text: "아이디 조회 중 오류가 발생했습니다.", isError: true });
+    }
+  };
+
+  // 비밀번호 재설정 요청
+  const handleResetPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setRecoveryResultMsg(null);
+    try {
+      const res = await axios.post(`${API_BASE}/auth/reset-pw`, {
+        username: recoveryId,
+        email: recoveryEmail,
+        new_password: recoveryNewPw
+      });
+      if (res.data.success) {
+        setRecoveryResultMsg({ text: res.data.message, isError: false });
+        setRecoveryNewPw("");
+      } else {
+        setRecoveryResultMsg({ text: res.data.message, isError: true });
+      }
+    } catch (err: any) {
+      setRecoveryResultMsg({ text: "비밀번호 재설정 중 오류가 발생했습니다.", isError: true });
     }
   };
 
@@ -150,10 +254,14 @@ export default function Home() {
         setIsOnboarding(true);
       } else {
         const user = res.data.user;
+        if (res.data.token) {
+          localStorage.setItem("access_token", res.data.token);
+        }
         setCurrentUser(user.username);
         setCurrentNickname(user.nickname || user.username);
         setUserRole(user.role || "user");
         setIsAuthOpen(false);
+        showToast(`${user.nickname || user.username}님 환영합니다!`, "success");
         fetchWatchlist(user.username);
       }
     } catch (err) {
@@ -179,11 +287,15 @@ export default function Home() {
       });
 
       if (res.data.success) {
+        if (res.data.token) {
+          localStorage.setItem("access_token", res.data.token);
+        }
         setCurrentUser(socialTempUsername);
         setCurrentNickname(res.data.user.nickname);
         setUserRole("user");
         setIsOnboarding(false);
         setIsAuthOpen(false);
+        showToast("회원 정보가 성공적으로 등록되었습니다.", "success");
         fetchWatchlist(socialTempUsername);
       }
     } catch (err: any) {
@@ -192,12 +304,13 @@ export default function Home() {
   };
 
   const handleLogout = () => {
+    localStorage.removeItem("access_token");
     setCurrentUser("");
     setCurrentNickname("");
     setUserRole("user");
     setWatchlist([]);
-    setBatchResults([]);
     setActiveTab("analyze");
+    showToast("로그아웃되었습니다. 검색 기능만 이용하실 수 있습니다.", "info");
   };
 
   const executeAnalysis = async (targetStock: string) => {
@@ -208,9 +321,11 @@ export default function Home() {
       setAnalysisResult(res.data);
       setShowDeepDive(false);
       setSearchStock(targetStock.trim());
+      saveRecentSearch(targetStock.trim());
+      setActiveTab("analyze");
     } catch (err: any) {
-      const errMsg = err.response?.data?.detail || "종목 분석 중 오류가 발생했습니다.";
-      alert(`⚠️ ${errMsg}`);
+      const errMsg = err.response?.data?.detail || err.response?.data?.error || "종목 분석 중 오류가 발생했습니다.";
+      showToast(errMsg, "error");
       setAnalysisResult(null);
     } finally {
       setAnalyzing(false);
@@ -222,62 +337,68 @@ export default function Home() {
   };
 
   const fetchWatchlist = async (username: string) => {
+    if (!username) {
+      setWatchlist([]);
+      return;
+    }
+    setWatchlistLoading(true);
     try {
-      const res = await axios.get(`${API_BASE}/watchlist/${username}`);
-      setWatchlist(res.data.watchlist);
+      const res = await axios.get(`${API_BASE}/watchlist?user_id=${encodeURIComponent(username)}`);
+      setWatchlist(res.data.items || []);
     } catch (err) {
-      console.error(err);
+      console.error("관심 종목 로드 실패:", err);
+    } finally {
+      setWatchlistLoading(false);
     }
   };
 
   const handleAddWatchlist = async () => {
     if (!currentUser) {
+      showToast("관심 종목 등록은 로그인이 필요합니다.", "info");
       setIsAuthOpen(true);
       return;
     }
-    if (!newStockName.trim()) return;
-    try {
-      await axios.post(`${API_BASE}/watchlist/add`, {
-        username: currentUser,
-        stock_name: newStockName,
-        memo: newStockMemo || "관심 종목"
-      });
-      setNewStockName("");
-      setNewStockMemo("");
-      fetchWatchlist(currentUser);
-    } catch (err: any) {
-      alert(err.response?.data?.detail || "등록 실패");
-    }
-  };
+    const cleanStock = newStockName.trim();
+    if (!cleanStock) return;
 
-  const handleDeleteWatchlist = async (stockName: string) => {
-    try {
-      await axios.delete(`${API_BASE}/watchlist/delete`, {
-        data: { username: currentUser, stock_name: stockName }
-      });
-      fetchWatchlist(currentUser);
-    } catch (err: any) {
-      alert(err.response?.data?.detail || "삭제 실패");
+    if (watchlist.some(item => item.stock_name.toLowerCase() === cleanStock.toLowerCase())) {
+      showToast(`'${cleanStock}'은(는) 이미 등록된 관심 종목입니다.`, "info");
+      return;
     }
-  };
 
-  const handleBatchScan = async () => {
-    if (watchlist.length === 0) return;
-    setBatchLoading(true);
+    setAddingStock(true);
     try {
-      const promises = watchlist.map(item => axios.get(`${API_BASE}/analyze/${encodeURIComponent(item.stock_name)}`));
-      const responses = await Promise.all(promises);
-      const results = responses.map((res, idx) => ({
-        stock_name: watchlist[idx].stock_name,
-        memo: watchlist[idx].memo,
-        score: res.data.score_info.score,
-        status: res.data.score_info.status
-      }));
-      setBatchResults(results);
-    } catch (err) {
-      alert("일괄 점검 중 오류가 발생했습니다.");
+      const res = await axios.post(`${API_BASE}/watchlist/add`, {
+        user_id: currentUser,
+        stock_name: cleanStock
+      });
+      if (res.data.status === "SUCCESS" || res.data.success) {
+        setNewStockName("");
+        showToast(`'${cleanStock}'이(가) 관심 목록에 등록되었습니다.`, "success");
+        await fetchWatchlist(currentUser);
+      } else {
+        showToast(res.data.message || "등록 실패", "error");
+      }
+    } catch (err: any) {
+      showToast(err.response?.data?.message || "등록 중 오류가 발생했습니다.", "error");
     } finally {
-      setBatchLoading(false);
+      setAddingStock(false);
+    }
+  };
+
+  const handleDeleteWatchlist = async (stockName: string, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    if (!currentUser) return;
+
+    try {
+      await axios.post(`${API_BASE}/watchlist/remove`, {
+        user_id: currentUser,
+        stock_name: stockName
+      });
+      setWatchlist(prev => prev.filter(item => item.stock_name !== stockName));
+      showToast(`'${stockName}'이(가) 삭제되었습니다.`, "info");
+    } catch (err: any) {
+      showToast(err.response?.data?.message || "삭제 실패", "error");
     }
   };
 
@@ -301,36 +422,40 @@ export default function Home() {
       setDetectedStocks(stocks);
       setSelectedStocks(stocks);
     } catch (err) {
-      alert("이미지에서 종목을 인식하는 중 오류가 발생했습니다.");
+      showToast("이미지에서 종목을 인식하는 중 오류가 발생했습니다.", "error");
     } finally {
       setOcrLoading(false);
     }
   };
 
   const handleConfirmOcrBulkRegister = async () => {
-    if (selectedStocks.length === 0) {
-      alert("등록할 종목을 1개 이상 선택해 주세요.");
+    if (!currentUser) {
+      setIsOcrModalOpen(false);
+      setIsAuthOpen(true);
+      showToast("종목 등록은 로그인이 필요합니다.", "info");
       return;
     }
 
-    const items = selectedStocks.map(s => ({
-      stock_name: s,
-      memo: "스크린샷 자동 인식"
-    }));
+    if (selectedStocks.length === 0) {
+      showToast("등록할 종목을 1개 이상 선택해 주세요.", "info");
+      return;
+    }
 
     try {
-      const res = await axios.post(`${API_BASE}/watchlist/add-bulk`, {
-        username: currentUser,
-        items: items
-      });
-      alert(res.data.message);
+      for (const s of selectedStocks) {
+        await axios.post(`${API_BASE}/watchlist/add`, {
+          user_id: currentUser,
+          stock_name: s
+        });
+      }
+      showToast(`${selectedStocks.length}개 종목이 성공적으로 등록되었습니다.`, "success");
       setIsOcrModalOpen(false);
       setDetectedStocks([]);
       setSelectedStocks([]);
       setPreviewImage(null);
       fetchWatchlist(currentUser);
     } catch (err) {
-      alert("일괄 등록 처리 중 오류가 발생했습니다.");
+      showToast("일괄 등록 처리 중 오류가 발생했습니다.", "error");
     }
   };
 
@@ -343,13 +468,15 @@ export default function Home() {
       summary: null
     });
     try {
-      const res = await axios.post(`${API_BASE}/analyze/disclosure-summary`, {
-        report_nm: disclosure.report_nm,
-        rcept_no: disclosure.rcept_no || ""
+      const res = await axios.get(`${API_BASE}/disclosure/summary`, {
+        params: {
+          report_nm: disclosure.report_nm,
+          rcept_no: disclosure.rcept_no || ""
+        }
       });
-      setSummaryModal((prev: any) => ({ ...prev, summary: res.data.summary }));
+      setSummaryModal((prev: any) => ({ ...prev, summary: res.data.summary || res.data }));
     } catch (err) {
-      alert("공시 요약 중 오류가 발생했습니다.");
+      showToast("공시 요약 중 오류가 발생했습니다.", "error");
     } finally {
       setSummaryLoading(false);
     }
@@ -370,8 +497,9 @@ export default function Home() {
       });
       setInqSuccess("소중한 의견이 정상 접수되었습니다. 관리자가 신속히 검토하겠습니다.");
       setInqContent("");
+      showToast("문의가 정상 접수되었습니다.", "success");
     } catch (err) {
-      alert("문의 접수 실패");
+      showToast("문의 접수 실패", "error");
     }
   };
 
@@ -396,8 +524,28 @@ export default function Home() {
     return item ? item.r : 0;
   };
 
+  const safeCount = watchlist.filter(item => item.score >= 75).length;
+  const cautionCount = watchlist.filter(item => item.score >= 45 && item.score < 75).length;
+  const dangerCount = watchlist.filter(item => item.score < 45).length;
+
   return (
-    <div className="min-h-screen flex flex-col bg-slate-50">
+    <div className="min-h-screen flex flex-col bg-slate-50 relative">
+      {/* 🔔 플로팅 토스트 알림 */}
+      {toast && (
+        <div className="fixed top-20 right-6 z-50 animate-in fade-in slide-in-from-top-3 duration-300">
+          <div className={`px-4 py-3 rounded-2xl shadow-xl flex items-center gap-2.5 text-xs font-bold border backdrop-blur-md ${
+            toast.type === "success" ? "bg-emerald-500/95 text-white border-emerald-400" :
+            toast.type === "error" ? "bg-rose-500/95 text-white border-rose-400" :
+            "bg-slate-800/95 text-white border-slate-700"
+          }`}>
+            {toast.type === "success" && <Check className="w-4 h-4" />}
+            {toast.type === "error" && <AlertCircle className="w-4 h-4" />}
+            {toast.type === "info" && <BellRing className="w-4 h-4" />}
+            <span>{toast.message}</span>
+          </div>
+        </div>
+      )}
+
       {/* 1. 상단 내비게이션 바 */}
       <header className="sticky top-0 z-30 bg-white/80 backdrop-blur border-b border-slate-200 px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
@@ -406,7 +554,7 @@ export default function Home() {
           </div>
           <div>
             <h1 className="text-lg font-bold text-slate-900 leading-tight">Financial Multi-Risk Guardian</h1>
-            <p className="text-xs text-slate-500">실시간 주가 · 우선주 패밀리 괴리율 비교 · DART 공시 지뢰 탐지</p>
+            <p className="text-xs text-slate-500">실시간 주가 · 스마트 캐시 하이브리드 진단 · DART 공시 지뢰 탐지</p>
           </div>
         </div>
 
@@ -456,14 +604,17 @@ export default function Home() {
             🔍 단일 종목 다차원 정밀 진단
           </button>
           <button
-            onClick={() => setActiveTab("watchlist")}
+            onClick={() => {
+              setActiveTab("watchlist");
+              if (currentUser) fetchWatchlist(currentUser);
+            }}
             className={`pb-3 px-4 text-sm font-bold border-b-2 transition ${
               activeTab === "watchlist"
                 ? "border-emerald-600 text-emerald-600"
                 : "border-transparent text-slate-400 hover:text-slate-700"
             }`}
           >
-            ⭐ 관심 종목 가디언 {watchlist.length > 0 && `(${watchlist.length})`}
+            ⭐ 관심 종목 가디언 {currentUser && watchlist.length > 0 && `(${watchlist.length})`}
           </button>
           <button
             onClick={() => setActiveTab("inquiry")}
@@ -499,6 +650,8 @@ export default function Home() {
             <div className="space-y-6">
               <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-col gap-4">
                 <h2 className="text-base font-bold text-slate-800">종목 리스크 스캔</h2>
+                
+                {/* 종목 검색창 */}
                 <div className="flex gap-2">
                   <input
                     type="text"
@@ -509,7 +662,7 @@ export default function Home() {
                         handleAnalyze();
                       }
                     }}
-                    placeholder="예: 삼성전자, 현대차, LG화학"
+                    placeholder="예: 노루페인트, 한화, 카카오"
                     disabled={analyzing}
                     className="flex-1 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-emerald-500 disabled:bg-slate-100"
                   />
@@ -523,15 +676,61 @@ export default function Home() {
                   </button>
                 </div>
 
+                {/* ⚡ 심사위원 원클릭 빠른 시연 프리셋 바 */}
+                <div className="flex flex-wrap items-center gap-1.5 pt-1 text-xs">
+                  <span className="text-[11px] text-slate-400 font-bold">⚡ 시연 프리셋:</span>
+                  <button
+                    type="button"
+                    onClick={() => { setSearchStock("파두"); executeAnalysis("파두"); }}
+                    disabled={analyzing}
+                    className="px-2 py-0.5 rounded-md bg-rose-50 hover:bg-rose-100 text-rose-600 font-bold border border-rose-200 transition cursor-pointer text-[11px]"
+                  >
+                    🔴 고위험 (파두)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setSearchStock("삼성전자"); executeAnalysis("삼성전자"); }}
+                    disabled={analyzing}
+                    className="px-2 py-0.5 rounded-md bg-emerald-50 hover:bg-emerald-100 text-emerald-600 font-bold border border-emerald-200 transition cursor-pointer text-[11px]"
+                  >
+                    🟢 클린 (삼성전자)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setSearchStock("카카오"); executeAnalysis("카카오"); }}
+                    disabled={analyzing}
+                    className="px-2 py-0.5 rounded-md bg-amber-50 hover:bg-amber-100 text-amber-600 font-bold border border-amber-200 transition cursor-pointer text-[11px]"
+                  >
+                    🟡 주의 (카카오)
+                  </button>
+                </div>
+
+                {recentSearches.length > 0 && (
+                  <div className="flex items-center gap-1.5 flex-wrap pt-1">
+                    <span className="text-[10px] text-slate-400 font-semibold flex items-center gap-0.5">
+                      <Clock className="w-3 h-3" /> 최근:
+                    </span>
+                    {recentSearches.map((s, idx) => (
+                      <button
+                        key={idx}
+                        onClick={() => executeAnalysis(s)}
+                        disabled={analyzing}
+                        className="text-[11px] bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium px-2 py-0.5 rounded-md transition cursor-pointer"
+                      >
+                        {s}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
                 <div className="bg-slate-50 p-4 rounded-xl text-xs text-slate-600 space-y-2 border border-slate-100">
                   <p className="font-bold text-slate-700">💡 3초 만에 끝내는 투자 판단:</p>
-                  <p>• <b>실시간 시세:</b> 현재가 및 우선주 패밀리 괴리율 비교</p>
+                  <p>• <b>스마트 캐시:</b> 공유 DB 캐시로 0.01초 초고속 조회</p>
                   <p>• <b>HF KR-FinBERT:</b> 공시·뉴스 감성 지표 분석</p>
                   <p>• <b>시나리오 예측:</b> Gemini AI 기반 3~6개월 전망</p>
                 </div>
               </div>
 
-              {/* 📍 다차원 리스크 지형도 (Radar Map: 여백 및 크기 최적화로 글자 잘림 완벽 방지) */}
               {analysisResult && (
                 <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col items-center animate-in fade-in duration-300">
                   <div className="w-full flex items-center justify-between mb-1">
@@ -575,7 +774,6 @@ export default function Home() {
             <div className="md:col-span-2 space-y-6">
               {analysisResult ? (
                 <>
-                  {/* 1. 🚦 3초 투자 판단 + 💰 실시간 주가 표시 카드 */}
                   {analysisResult.forecast_scenario && (
                     <div className={`p-6 rounded-2xl border shadow-sm transition ${
                       analysisResult.forecast_scenario.traffic_light === "RED" ? "bg-rose-50/70 border-rose-200" :
@@ -604,7 +802,6 @@ export default function Home() {
                               )}
                             </div>
 
-                            {/* 💰 [신규] 검색한 주식 실시간 현재가/등락률 표기 */}
                             {analysisResult.price_info?.has_price && (
                               <div className="flex items-center gap-2 mt-1.5 text-xs">
                                 <span className="font-extrabold text-base text-slate-900">
@@ -650,7 +847,7 @@ export default function Home() {
                     </div>
                   )}
 
-                  {/* 👑 [신규] 우선주 가로 스크롤 비교 캐러셀 (현재가 & 괴리율 나란히 비교) */}
+                  {/* 우선주 비교 캐러셀 */}
                   {analysisResult.price_info?.has_preferred_family && analysisResult.price_info?.related_pref_stocks?.length > 0 && (
                     <div className="bg-gradient-to-br from-indigo-50/90 via-purple-50/70 to-slate-50 border border-purple-200 p-6 rounded-2xl shadow-sm space-y-4 animate-in fade-in duration-300">
                       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-purple-100">
@@ -673,7 +870,6 @@ export default function Home() {
                         </span>
                       </div>
 
-                      {/* ↔️ 가로 스크롤 가능한 우선주 카드 리스트 */}
                       <div className="flex gap-3 overflow-x-auto pb-2 scrollbar-thin scrollbar-thumb-purple-200 scrollbar-track-transparent">
                         {analysisResult.price_info.related_pref_stocks.map((p: any, idx: number) => (
                           <div 
@@ -733,7 +929,7 @@ export default function Home() {
                     </div>
                   )}
 
-                  {/* 🤗 HuggingFace KR-FinBERT 감성 분석 카드 */}
+                  {/* 감성 분석 카드 */}
                   {analysisResult.sentiment_data && (
                     <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
                       <div className="flex items-center justify-between mb-3">
@@ -780,7 +976,7 @@ export default function Home() {
                     </div>
                   )}
 
-                  {/* 2. 🔮 향후 3~6개월 주가 시나리오 */}
+                  {/* 시나리오 카드 */}
                   {analysisResult.forecast_scenario?.scenarios && (
                     <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
                       <div className="flex items-center justify-between mb-4">
@@ -810,7 +1006,7 @@ export default function Home() {
                     </div>
                   )}
 
-                  {/* 3. 🛡️ 3대 리스크 핵심 요약 카드 */}
+                  {/* 3대 리스크 카드 */}
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                     <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between">
                       <div className="flex items-center gap-2 mb-2">
@@ -858,7 +1054,7 @@ export default function Home() {
                     </div>
                   </div>
 
-                  {/* 4. 🗂️ 심층 분석 데이터 접이식 아코디언 버튼 */}
+                  {/* 심층 분석 아코디언 */}
                   <div className="pt-2">
                     <button
                       onClick={() => setShowDeepDive(!showDeepDive)}
@@ -878,7 +1074,6 @@ export default function Home() {
                     </button>
                   </div>
 
-                  {/* 5. 📦 심층 데이터 서랍 내부 */}
                   {showDeepDive && (
                     <div className="space-y-6 pt-2 animate-in fade-in slide-in-from-top-4 duration-200">
                       <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
@@ -1041,7 +1236,7 @@ export default function Home() {
               ) : (
                 <div className="bg-white p-12 rounded-2xl border border-dashed border-slate-200 text-center text-slate-400">
                   <Search className="w-10 h-10 mx-auto mb-3 text-slate-300" />
-                  <p>종목명을 입력하고 스캔 버튼을 누르면 DART 공시 기반 다차원 정밀 진단이 시작됩니다.</p>
+                  <p>종목명을 입력하고 스캔 버튼을 누르거나 위의 시연 프리셋을 클릭하세요.</p>
                 </div>
               )}
             </div>
@@ -1052,133 +1247,212 @@ export default function Home() {
         {activeTab === "watchlist" && (
           <div className="space-y-6">
             {!currentUser ? (
-              <div className="bg-white p-12 rounded-2xl border border-slate-200 shadow-sm text-center">
-                <Lock className="w-10 h-10 mx-auto text-emerald-600 mb-3" />
-                <h3 className="text-lg font-bold text-slate-800 mb-1">로그인이 필요한 기능입니다</h3>
-                <p className="text-sm text-slate-500 mb-6">관심 종목을 등록하고 지배구조 및 오버행 리스크를 한눈에 일괄 점검하세요.</p>
+              <div className="bg-white p-16 rounded-3xl border border-slate-200 shadow-sm text-center max-w-xl mx-auto my-8">
+                <div className="w-16 h-16 bg-emerald-50 text-emerald-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                  <Lock className="w-8 h-8" />
+                </div>
+                <h3 className="text-xl font-bold text-slate-900 mb-2">로그인이 필요한 서비스입니다</h3>
+                <p className="text-sm text-slate-500 mb-6 leading-relaxed">
+                  로그인하시면 나만의 관심/보유 종목을 등록하고<br />
+                  상장폐지, 지배구조 변동, 메자닌 사채 희석 리스크를 실시간 관제할 수 있습니다.
+                </p>
                 <button
                   onClick={() => {
                     setIsOnboarding(false);
                     setIsAuthOpen(true);
                   }}
-                  className="bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold px-6 py-2.5 rounded-lg shadow-sm transition cursor-pointer"
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-bold px-8 py-3 rounded-xl shadow-sm transition cursor-pointer"
                 >
-                  로그인하고 시작하기
+                  로그인 / 간편가입
                 </button>
               </div>
             ) : (
               <>
-                <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4 pb-3 border-b border-slate-100">
+                <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
+                  <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm flex items-center justify-between">
                     <div>
-                      <h3 className="text-sm font-bold text-slate-800">⭐ 매수 검토 종목 등록 (상시 모니터링)</h3>
-                      <p className="text-xs text-slate-500 mt-0.5">직접 입력하거나 증권사 앱 스크린샷을 올려 한 번에 등록하세요.</p>
+                      <p className="text-xs font-semibold text-slate-400">총 보유/관심 종목</p>
+                      <p className="text-2xl font-black text-slate-800 mt-1">{watchlist.length}개</p>
                     </div>
+                    <div className="p-3 bg-slate-100 rounded-xl text-slate-600">
+                      <Coins className="w-5 h-5" />
+                    </div>
+                  </div>
+                  <div className="bg-emerald-50/60 border border-emerald-200 rounded-2xl p-4 shadow-sm flex items-center justify-between">
+                    <div>
+                      <p className="text-xs font-semibold text-emerald-600">정상 / 안전 (75점↑)</p>
+                      <p className="text-2xl font-black text-emerald-700 mt-1">{safeCount}개</p>
+                    </div>
+                    <div className="p-3 bg-emerald-100 rounded-xl text-emerald-600">
+                      <ShieldCheck className="w-5 h-5" />
+                    </div>
+                  </div>
+                  <div className="bg-amber-50/60 border border-amber-200 rounded-2xl p-4 shadow-sm flex items-center justify-between">
+                    <div>
+                      <p className="text-xs font-semibold text-amber-600">주의 관찰 (45~74점)</p>
+                      <p className="text-2xl font-black text-amber-700 mt-1">{cautionCount}개</p>
+                    </div>
+                    <div className="p-3 bg-amber-100 rounded-xl text-amber-600">
+                      <AlertCircle className="w-5 h-5" />
+                    </div>
+                  </div>
+                  <div className="bg-rose-50/60 border border-rose-200 rounded-2xl p-4 shadow-sm flex items-center justify-between">
+                    <div>
+                      <p className="text-xs font-semibold text-rose-600">고위험 경보 (45점↓)</p>
+                      <p className="text-2xl font-black text-rose-700 mt-1">{dangerCount}개</p>
+                    </div>
+                    <div className="p-3 bg-rose-100 rounded-xl text-rose-600">
+                      <AlertTriangle className="w-5 h-5" />
+                    </div>
+                  </div>
+                </div>
 
-                    <button
-                      onClick={() => setIsOcrModalOpen(true)}
-                      className="bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white text-xs font-bold px-4 py-2.5 rounded-xl shadow-sm transition flex items-center justify-center gap-1.5 cursor-pointer shrink-0"
-                    >
-                      <Camera className="w-4 h-4" /> 📸 스크린샷 OCR로 종목 불러오기
-                    </button>
+                <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col md:flex-row items-center justify-between gap-4">
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-800">포트폴리오 리스크 관제 센터</h3>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      등록된 종목은 공시 변동이 없는 한 로컬 SQLite 캐시로 <b>0.01초</b> 만에 안전도를 출력합니다.
+                    </p>
                   </div>
 
-                  <div className="flex flex-col md:flex-row gap-3">
+                  <div className="flex items-center gap-2 w-full md:w-auto">
                     <input
                       type="text"
+                      placeholder="종목명 (예: 카카오, 셀트리온)"
                       value={newStockName}
                       onChange={(e) => setNewStockName(e.target.value)}
-                      placeholder="종목명 (예: 삼성전자, 현대차, 노루페인트)"
-                      className="border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-emerald-500 md:w-1/4"
-                    />
-                    <input
-                      type="text"
-                      value={newStockMemo}
-                      onChange={(e) => setNewStockMemo(e.target.value)}
-                      placeholder="투자 검토 사유 / 메모 (예: 실적 턴어라운드 기대, 저평가 구간)"
-                      className="border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-emerald-500 flex-1"
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !addingStock) {
+                          handleAddWatchlist();
+                        }
+                      }}
+                      className="px-3 py-2 text-sm border border-slate-300 rounded-xl focus:outline-none focus:border-emerald-500 w-full sm:w-56"
                     />
                     <button
                       onClick={handleAddWatchlist}
-                      className="bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold px-5 py-2 rounded-lg transition flex items-center justify-center gap-1.5 cursor-pointer"
+                      disabled={addingStock || !newStockName.trim()}
+                      className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white text-xs font-bold px-4 py-2.5 rounded-xl transition flex items-center gap-1 shrink-0 cursor-pointer"
                     >
-                      <Plus className="w-4 h-4" /> 직접 등록
+                      <Plus className="w-4 h-4" /> {addingStock ? "등록 중..." : "종목 추가"}
+                    </button>
+                    <button
+                      onClick={() => setIsOcrModalOpen(true)}
+                      className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold px-3 py-2.5 rounded-xl transition flex items-center gap-1 shrink-0 cursor-pointer"
+                      title="MTS 캡처 이미지로 종목 일괄 추가"
+                    >
+                      <Camera className="w-4 h-4 text-emerald-600" /> 스크린샷 OCR
+                    </button>
+                    <button
+                      onClick={() => fetchWatchlist(currentUser)}
+                      disabled={watchlistLoading}
+                      className="p-2.5 text-slate-400 hover:text-slate-700 rounded-xl hover:bg-slate-100 transition cursor-pointer"
+                      title="새로고침"
+                    >
+                      <RefreshCw className={`w-4 h-4 ${watchlistLoading ? "animate-spin text-emerald-600" : ""}`} />
                     </button>
                   </div>
                 </div>
 
                 <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
                   <div className="p-4 border-b border-slate-100 flex items-center justify-between">
-                    <h4 className="font-bold text-slate-800 text-sm">관심 종목 모니터링 목록 ({watchlist.length}개)</h4>
-                    <button
-                      onClick={handleBatchScan}
-                      disabled={batchLoading || watchlist.length === 0}
-                      className="bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 text-white text-xs font-semibold px-4 py-2 rounded-lg transition flex items-center gap-1.5 cursor-pointer"
-                    >
-                      {batchLoading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Eye className="w-3.5 h-3.5" />}
-                      전체 일괄 리스크 진단
-                    </button>
+                    <h4 className="font-bold text-slate-800 text-sm">
+                      내 관심 종목 ({watchlist.length}개)
+                    </h4>
+                    <span className="text-xs text-slate-400">
+                      종목을 클릭하면 정밀 진단 탭으로 즉시 이동합니다.
+                    </span>
                   </div>
 
-                  <table className="w-full text-left text-sm">
-                    <thead className="bg-slate-50 text-slate-500 text-xs uppercase font-medium">
-                      <tr>
-                        <th className="px-6 py-3">종목명</th>
-                        <th className="px-6 py-3">투자 검토 메모</th>
-                        <th className="px-6 py-3">등록일</th>
-                        <th className="px-6 py-3 text-right">삭제</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {watchlist.map((item) => (
-                        <tr key={item.id} className="hover:bg-slate-50/50">
-                          <td className="px-6 py-4 font-bold text-slate-900">{item.stock_name}</td>
-                          <td className="px-6 py-4 text-slate-600">{item.memo}</td>
-                          <td className="px-6 py-4 text-slate-400 text-xs">{item.created_at.slice(0, 10)}</td>
-                          <td className="px-6 py-4 text-right">
-                            <button
-                              onClick={() => handleDeleteWatchlist(item.stock_name)}
-                              className="text-slate-300 hover:text-rose-500 transition cursor-pointer"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                      {watchlist.length === 0 && (
-                        <tr>
-                          <td colSpan={4} className="text-center py-8 text-slate-400 text-sm">
-                            등록된 관심 종목이 없습니다.
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-
-                {batchResults.length > 0 && (
-                  <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
-                    <h4 className="font-bold text-slate-800 text-sm">⚡ 관심 종목 일괄 안전도 점검 결과</h4>
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                      {batchResults.map((res, idx) => (
-                        <div key={idx} className="p-4 rounded-xl border border-slate-100 bg-slate-50/50 flex flex-col justify-between">
-                          <div>
-                            <div className="flex justify-between items-center mb-2">
-                              <h5 className="font-bold text-slate-900">{res.stock_name}</h5>
-                              <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
-                                res.score >= 75 ? "bg-emerald-100 text-emerald-700" :
-                                res.score >= 45 ? "bg-amber-100 text-amber-700" : "bg-rose-100 text-rose-700"
-                              }`}>
-                                {res.score}점 ({res.status})
-                              </span>
-                            </div>
-                            <p className="text-xs text-slate-500">{res.memo}</p>
-                          </div>
-                        </div>
-                      ))}
+                  {watchlistLoading ? (
+                    <div className="py-16 text-center text-slate-400 text-sm flex flex-col items-center gap-2">
+                      <RefreshCw className="w-5 h-5 animate-spin text-emerald-600" />
+                      <span>포트폴리오 리스크를 진단하고 있습니다...</span>
                     </div>
-                  </div>
-                )}
+                  ) : watchlist.length === 0 ? (
+                    <div className="py-16 text-center text-slate-400 text-sm">
+                      등록된 관심 종목이 없습니다. 상단에서 관심 있는 기업을 추가해 보세요.
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left text-sm">
+                        <thead className="bg-slate-50 text-slate-500 text-xs uppercase font-medium">
+                          <tr>
+                            <th className="px-6 py-3.5">종목명</th>
+                            <th className="px-6 py-3.5">현재가 (등락률)</th>
+                            <th className="px-6 py-3.5">안전 점수</th>
+                            <th className="px-6 py-3.5 text-center">리스크 상태</th>
+                            <th className="px-6 py-3.5 text-right">관리</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 text-xs">
+                          {watchlist.map((item) => (
+                            <tr
+                              key={item.stock_name}
+                              onClick={() => executeAnalysis(item.stock_name)}
+                              className="hover:bg-slate-50/70 transition cursor-pointer group"
+                            >
+                              <td className="px-6 py-4 font-black text-slate-900 text-sm flex items-center gap-2">
+                                <span>{item.stock_name}</span>
+                                <ChevronRight className="w-3.5 h-3.5 text-slate-300 group-hover:text-emerald-600 transition" />
+                              </td>
+                              <td className="px-6 py-4 font-mono font-bold text-slate-800">
+                                <span>{item.current_price}</span>
+                                {item.change_str && (
+                                  <span className={`ml-2 text-[11px] ${
+                                    item.change_str.includes("+")
+                                      ? "text-rose-600 font-bold"
+                                      : item.change_str.includes("-")
+                                      ? "text-blue-600 font-bold"
+                                      : "text-slate-400"
+                                  }`}>
+                                    {item.change_str}
+                                  </span>
+                                )}
+                              </td>
+                              <td className="px-6 py-4">
+                                <div className="flex items-center gap-3">
+                                  <div className="w-28 bg-slate-100 h-2 rounded-full overflow-hidden">
+                                    <div
+                                      className={`h-full rounded-full transition-all duration-500 ${
+                                        item.score >= 75
+                                          ? "bg-emerald-500"
+                                          : item.score >= 45
+                                          ? "bg-amber-500"
+                                          : "bg-rose-500"
+                                      }`}
+                                      style={{ width: `${Math.min(100, Math.max(0, item.score))}%` }}
+                                    />
+                                  </div>
+                                  <span className="font-black text-slate-700 text-xs">{item.score}점</span>
+                                </div>
+                              </td>
+                              <td className="px-6 py-4 text-center">
+                                <span className={`px-2.5 py-1 text-xs font-bold rounded-full ${
+                                  item.score >= 75
+                                    ? "bg-emerald-100 text-emerald-700"
+                                    : item.score >= 45
+                                    ? "bg-amber-100 text-amber-700"
+                                    : "bg-rose-100 text-rose-700 animate-pulse"
+                                }`}>
+                                  {item.status || (item.score >= 75 ? "정상" : item.score >= 45 ? "주의" : "위험")}
+                                </span>
+                              </td>
+                              <td className="px-6 py-4 text-right">
+                                <button
+                                  onClick={(e) => handleDeleteWatchlist(item.stock_name, e)}
+                                  className="text-slate-300 hover:text-rose-500 transition p-1 cursor-pointer"
+                                  title="관심 종목 삭제"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
               </>
             )}
           </div>
@@ -1344,7 +1618,7 @@ export default function Home() {
         )}
       </main>
 
-      {/* 📸 3. 증권사 앱 스크린샷 OCR 모달 */}
+      {/* 📸 OCR 모달 */}
       {isOcrModalOpen && (
         <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white w-full max-w-lg rounded-3xl p-6 shadow-2xl relative animate-in fade-in zoom-in-95 duration-200">
@@ -1633,17 +1907,27 @@ export default function Home() {
                   </button>
                 </form>
 
-                <div className="mt-5 text-center">
-                  <p className="text-xs text-slate-500">
-                    아직 계정이 없으신가요?{" "}
-                    <Link
-                      href="/register"
-                      onClick={() => setIsAuthOpen(false)}
-                      className="text-emerald-600 font-bold hover:underline"
-                    >
-                      일반 회원가입
-                    </Link>
-                  </p>
+                {/* 🔗 [신규] 아이디/비밀번호 찾기 & 회원가입 버튼 영역 */}
+                <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsAuthOpen(false);
+                      setRecoveryResultMsg(null);
+                      setIsAccountRecoveryOpen(true);
+                    }}
+                    className="hover:text-slate-800 transition cursor-pointer flex items-center gap-1"
+                  >
+                    <KeyRound className="w-3.5 h-3.5 text-slate-400" />
+                    아이디 / 비밀번호 찾기
+                  </button>
+                  <Link
+                    href="/register"
+                    onClick={() => setIsAuthOpen(false)}
+                    className="text-emerald-600 font-bold hover:underline"
+                  >
+                    일반 회원가입
+                  </Link>
                 </div>
               </div>
             )}
@@ -1651,7 +1935,161 @@ export default function Home() {
         </div>
       )}
 
-      {/* 5. DART 공시 AI 3줄 요약 팝업 */}
+      {/* 🔑 [신규] 아이디 / 비밀번호 찾기 모달 */}
+      {isAccountRecoveryOpen && (
+        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-sm rounded-3xl p-6 shadow-2xl relative animate-in fade-in zoom-in-95 duration-200">
+            <button
+              onClick={() => {
+                setIsAccountRecoveryOpen(false);
+                setRecoveryResultMsg(null);
+              }}
+              className="absolute top-5 right-5 text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="flex items-center gap-2 mb-4">
+              <div className="p-2 rounded-xl bg-slate-100 text-slate-700">
+                <KeyRound className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="font-bold text-slate-900 text-base">계정 정보 찾기</h3>
+                <p className="text-xs text-slate-500">가입 시 등록한 정보로 확인합니다.</p>
+              </div>
+            </div>
+
+            {/* 탭 버튼 */}
+            <div className="flex border-b border-slate-200 mb-4 text-xs font-bold">
+              <button
+                type="button"
+                onClick={() => {
+                  setRecoveryTab("findId");
+                  setRecoveryResultMsg(null);
+                }}
+                className={`flex-1 py-2 text-center border-b-2 transition ${
+                  recoveryTab === "findId"
+                    ? "border-emerald-600 text-emerald-600"
+                    : "border-transparent text-slate-400 hover:text-slate-600"
+                }`}
+              >
+                아이디 찾기
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setRecoveryTab("resetPw");
+                  setRecoveryResultMsg(null);
+                }}
+                className={`flex-1 py-2 text-center border-b-2 transition ${
+                  recoveryTab === "resetPw"
+                    ? "border-emerald-600 text-emerald-600"
+                    : "border-transparent text-slate-400 hover:text-slate-600"
+                }`}
+              >
+                비밀번호 재설정
+              </button>
+            </div>
+
+            {recoveryTab === "findId" ? (
+              <form onSubmit={handleFindId} className="space-y-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    가입 이메일 주소
+                  </label>
+                  <input
+                    type="email"
+                    value={recoveryEmail}
+                    onChange={(e) => setRecoveryEmail(e.target.value)}
+                    placeholder="example@domain.com"
+                    className="w-full border border-slate-200 rounded-xl px-3 py-2 text-xs focus:outline-none focus:border-emerald-500"
+                    required
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs py-2.5 rounded-xl transition cursor-pointer"
+                >
+                  아이디 확인
+                </button>
+              </form>
+            ) : (
+              <form onSubmit={handleResetPassword} className="space-y-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    아이디
+                  </label>
+                  <input
+                    type="text"
+                    value={recoveryId}
+                    onChange={(e) => setRecoveryId(e.target.value)}
+                    placeholder="가입한 아이디 입력"
+                    className="w-full border border-slate-200 rounded-xl px-3 py-2 text-xs focus:outline-none focus:border-emerald-500"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    가입 이메일 주소
+                  </label>
+                  <input
+                    type="email"
+                    value={recoveryEmail}
+                    onChange={(e) => setRecoveryEmail(e.target.value)}
+                    placeholder="example@domain.com"
+                    className="w-full border border-slate-200 rounded-xl px-3 py-2 text-xs focus:outline-none focus:border-emerald-500"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    새 비밀번호
+                  </label>
+                  <input
+                    type="password"
+                    value={recoveryNewPw}
+                    onChange={(e) => setRecoveryNewPw(e.target.value)}
+                    placeholder="새로운 비밀번호 입력"
+                    className="w-full border border-slate-200 rounded-xl px-3 py-2 text-xs focus:outline-none focus:border-emerald-500"
+                    required
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs py-2.5 rounded-xl transition cursor-pointer"
+                >
+                  비밀번호 변경하기
+                </button>
+              </form>
+            )}
+
+            {recoveryResultMsg && (
+              <div className={`mt-3 p-3 rounded-xl text-xs text-center font-medium ${
+                recoveryResultMsg.isError ? "bg-rose-50 text-rose-600 border border-rose-100" : "bg-emerald-50 text-emerald-700 border border-emerald-100"
+              }`}>
+                {recoveryResultMsg.text}
+              </div>
+            )}
+
+            <div className="mt-4 pt-3 border-t border-slate-100 text-center">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsAccountRecoveryOpen(false);
+                  setIsAuthOpen(true);
+                }}
+                className="text-xs text-slate-500 hover:text-slate-800 underline cursor-pointer"
+              >
+                로그인 화면으로 돌아가기
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 5. DART 공시 AI 요약 팝업 */}
       {summaryModal && (
         <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white w-full max-w-lg rounded-3xl p-6 shadow-2xl relative animate-in fade-in zoom-in-95 duration-200">
@@ -1695,7 +2133,7 @@ export default function Home() {
                 <div className="space-y-2">
                   <h5 className="font-bold text-xs text-slate-700">📌 핵심 내용 3줄 요약</h5>
                   <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-100 space-y-2 text-xs text-slate-600">
-                    {summaryModal.summary.key_points.map((pt: string, idx: number) => (
+                    {summaryModal.summary.key_points?.map((pt: string, idx: number) => (
                       <p key={idx} className="leading-relaxed">
                         • {pt}
                       </p>

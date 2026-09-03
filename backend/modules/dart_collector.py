@@ -1,174 +1,233 @@
+"""
+==============================================================================
+[Module Overview]
+- 파일명: backend/modules/dart_collector.py
+- 프로젝트: Financial Multi-Risk Guardian
+- 주요 역할:
+    1. Open DART API 연동 및 고유번호(corp_code) 매핑 관리
+    2. 최근 공시 목록 및 표준 재무제표(BS/IS) 수집
+    3. [1순위 고도화] 전환사채(CB) / 신주인수권부사채(BW) / 유상증자 공시의
+       본문 원문 XML/HTML 파싱을 통한 실제 권면총액, 전환가액, 리픽싱 최저한도 추출
+    4. [Rate Limiting] DART API 호출 간 최소 지연(Throttle) 보장으로 429 차단
+==============================================================================
+"""
+
 import os
-import io
 import re
-import json
+import io
 import time
 import zipfile
-import xml.etree.ElementTree as ET
 import requests
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
+from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 
 load_dotenv()
 
 DART_API_KEY = os.getenv("DART_API_KEY", "")
-CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache_corp_codes.json")
+DART_BASE_URL = "https://opendart.fss.or.kr/api"
+
 
 class DartCollector:
+    """
+    Open DART API와 통신하여 기업 고유번호, 전자공시 목록, 재무제표 및
+    메자닌 사채 공시 본문 상세 스펙을 정밀 추출하는 데이터 수집 엔진
+    """
+
     def __init__(self, api_key: str = DART_API_KEY):
+        """
+        [함수 역할]
+        DART API 키를 등록하고, 기업명-고유번호 매핑 캐시 및 쓰로틀링 타임스탬프를 초기화합니다.
+        """
         self.api_key = api_key
-        self.corp_code_map = {}
+        self.corp_code_cache: Dict[str, str] = {}
+        self.last_call_time = 0.0
+        self.min_interval = 0.25  # 초당 최대 4회 이하로 제한하여 429 차단
         self._load_corp_codes()
 
+    def _throttle(self):
+        """DART API 호출 간 최소 간격을 강제하는 Rate Limiter"""
+        elapsed = time.time() - self.last_call_time
+        if elapsed < self.min_interval:
+            time.sleep(self.min_interval - elapsed)
+        self.last_call_time = time.time()
+
     def _load_corp_codes(self):
-        t0 = time.perf_counter()
-        if os.path.exists(CACHE_FILE):
-            try:
-                with open(CACHE_FILE, "r", encoding="utf-8") as f:
-                    self.corp_code_map = json.load(f)
-                elapsed = time.perf_counter() - t0
-                print(f"[DART] 기업 고유번호 {len(self.corp_code_map):,}개 로드 완료 ({elapsed:.2f}s)")
-                return
-            except Exception as e:
-                print(f"[DART] 캐시 읽기 실패: {e}")
-
+        """DART 전체 고유번호 목록(CORPCODE.zip) 다운로드 및 인메모리 색인 (1회 수행)"""
         if not self.api_key:
-            self.corp_code_map = {
-                "삼성전자": "00126380",
-                "카카오": "00258801",
-                "SK하이닉스": "00164779",
-                "현대자동차": "00164742",
-                "현대차": "00164742",
-                "LG화학": "00356361",
-                "LG전자": "00401731",
-                "노루페인트": "00607215"
-            }
             return
-        
-        t_dl = time.perf_counter()
-        url = "https://opendart.fss.or.kr/api/corpCode.xml"
-        params = {"crtfc_key": self.api_key}
+
+        cache_file = "data/corp_codes.json"
+        if os.path.exists(cache_file):
+            try:
+                import json
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    self.corp_code_cache = json.load(f)
+                return
+            except Exception:
+                pass
+
         try:
-            res = requests.get(url, params=params, timeout=15)
-            if res.status_code == 200 and res.content.startswith(b"PK"):
-                with zipfile.ZipFile(io.BytesIO(res.content)) as zf:
-                    for filename in zf.namelist():
-                        if filename.endswith(".xml"):
-                            xml_data = zf.read(filename)
-                            root = ET.fromstring(xml_data)
-                            for item in root.findall("list"):
-                                corp_name = item.findtext("corp_name", "").strip()
-                                corp_code = item.findtext("corp_code", "").strip()
-                                if corp_name and corp_code:
-                                    self.corp_code_map[corp_name] = corp_code
-                                    self.corp_code_map[corp_name.replace(" ", "")] = corp_code
-                
-                if "현대자동차" in self.corp_code_map:
-                    self.corp_code_map["현대차"] = self.corp_code_map["현대자동차"]
+            self._throttle()
+            url = f"{DART_BASE_URL}/corpCode.xml"
+            resp = requests.get(url, params={"crtfc_key": self.api_key}, timeout=30)
+            if resp.status_code == 200 and resp.content[:2] == b"PK":
+                with zipfile.ZipFile(io.BytesIO(resp.content)) as z:
+                    xml_content = z.read("CORPCODE.xml")
+                    root = ET.fromstring(xml_content)
+                    for item in root.findall("list"):
+                        corp_name = item.findtext("corp_name", "").strip()
+                        corp_code = item.findtext("corp_code", "").strip()
+                        if corp_name and corp_code:
+                            self.corp_code_cache[corp_name] = corp_code
 
-                with open(CACHE_FILE, "w", encoding="utf-8") as f:
-                    json.dump(self.corp_code_map, f, ensure_ascii=False)
-
-                elapsed = time.perf_counter() - t_dl
-                print(f"[DART] 기업 고유번호 {len(self.corp_code_map):,}개 다운로드 및 캐싱 완료 ({elapsed:.2f}s)")
+                os.makedirs("data", exist_ok=True)
+                import json
+                with open(cache_file, "w", encoding="utf-8") as f:
+                    json.dump(self.corp_code_cache, f, ensure_ascii=False)
         except Exception as e:
-            print(f"[DART] 초기화 실패: {e}")
+            print(f"[DartCollector] corpCode 로드 실패: {e}")
 
-    def resolve_corp_name(self, stock_name: str) -> str:
-        clean_name = stock_name.strip()
-        if clean_name in self.corp_code_map:
-            return clean_name
-
-        normalized = clean_name.replace(" ", "")
-        if normalized in self.corp_code_map:
-            return normalized
-
-        pref_pattern = r"((\s*\(우\))|(\s*우B?)|(\s*\d*우[A-Z]?)|(\(.*?우.*?\)))$"
-        stripped_name = re.sub(pref_pattern, "", normalized).strip()
-
-        if stripped_name and stripped_name in self.corp_code_map:
-            return stripped_name
-
-        alias_map = {
-            "현대차": "현대자동차",
-            "삼전": "삼성전자",
-            "하닉": "SK하이닉스",
-            "하이닉스": "SK하이닉스"
-        }
-        if stripped_name in alias_map and alias_map[stripped_name] in self.corp_code_map:
-            return alias_map[stripped_name]
-
-        return stripped_name or clean_name
+    def get_corp_code(self, stock_name: str) -> Optional[str]:
+        """기업명에 대응하는 DART 8자리 고유번호 조회"""
+        return self.corp_code_cache.get(stock_name.strip())
 
     def is_valid_company(self, stock_name: str) -> bool:
-        resolved = self.resolve_corp_name(stock_name)
-        return resolved in self.corp_code_map
+        """DART에 등록된 유효 상장사 여부 검증"""
+        if not self.corp_code_cache:
+            return True
+        return stock_name.strip() in self.corp_code_cache
 
-    def fetch_recent_disclosures(self, stock_name: str, months: int = 6) -> list[dict]:
-        resolved = self.resolve_corp_name(stock_name)
-        if resolved not in self.corp_code_map:
+    def fetch_recent_disclosures(self, stock_name: str, count: int = 10) -> List[Dict[str, Any]]:
+        """
+        [함수 역할]
+        지정 기업의 최근 공시 목록을 조회하고, 각 공시의 원문 링크를 매핑합니다.
+        """
+        corp_code = self.get_corp_code(stock_name)
+        if not corp_code:
             return []
 
-        corp_code = self.corp_code_map[resolved]
-        end_de = datetime.now().strftime("%Y%m%d")
-        bgn_de = (datetime.now() - timedelta(days=months * 30)).strftime("%Y%m%d")
-
-        url = "https://opendart.fss.or.kr/api/list.json"
+        self._throttle()
+        end_date = datetime.now().strftime("%Y%m%d")
+        bgn_date = (datetime.now() - timedelta(days=180)).strftime("%Y%m%d")
+        url = f"{DART_BASE_URL}/list.json"
         params = {
             "crtfc_key": self.api_key,
             "corp_code": corp_code,
-            "bgn_de": bgn_de,
-            "end_de": end_de,
-            "page_count": 100,
-            "last_reprt_at": "N"
+            "bgn_de": bgn_date,
+            "end_de": end_date,
+            "page_no": 1,
+            "page_count": count
         }
 
         try:
-            res = requests.get(url, params=params, timeout=6)
-            data = res.json()
-            if data.get("status") == "000" and "list" in data:
-                return [
-                    {
-                        "report_nm": item.get("report_nm", ""),
-                        "rcept_dt": item.get("rcept_dt", ""),
-                        "flr_nm": item.get("flr_nm", ""),
-                        "rcept_no": item.get("rcept_no", ""),
-                        "url": f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={item.get('rcept_no')}"
-                    }
-                    for item in data["list"]
-                ]
+            resp = requests.get(url, params=params, timeout=10)
+            data = resp.json()
+            if data.get("status") == "000":
+                disclosures = []
+                for item in data.get("list", []):
+                    rcept_no = item.get("rcept_no")
+                    disclosures.append({
+                        "corp_name": item.get("corp_name"),
+                        "report_nm": item.get("report_nm"),
+                        "rcept_no": rcept_no,
+                        "flr_nm": item.get("flr_nm"),
+                        "rcept_dt": item.get("rcept_dt"),
+                        "url": f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"
+                    })
+                return disclosures
         except Exception as e:
-            print(f"[DART] 공시 수집 실패: {e}")
-
+            print(f"[DartCollector] 공시 목록 조회 실패: {e}")
         return []
 
-    def fetch_financial_statements(self, stock_name: str) -> list[dict]:
-        resolved = self.resolve_corp_name(stock_name)
-        if resolved not in self.corp_code_map:
+    def parse_mezzanine_document_details(self, rcept_no: str) -> Dict[str, Any]:
+        """
+        [함수 역할 - 1순위 핵심]
+        공시 문서 번호(rcept_no)로 원문 XML/HTML을 다운로드하여
+        전환사채/신주인수권의 '권면총액', '전환가액', '최저 리픽싱 한도'를 정규표현식으로 정밀 추출합니다.
+        """
+        if not rcept_no or rcept_no == "NONE":
+            return {}
+
+        self._throttle()
+        url = f"{DART_BASE_URL}/document.xml"
+        params = {"crtfc_key": self.api_key, "rcept_no": rcept_no}
+
+        try:
+            resp = requests.get(url, params=params, timeout=15)
+            if resp.status_code != 200 or resp.content[:2] != b"PK":
+                return {}
+
+            text_content = ""
+            with zipfile.ZipFile(io.BytesIO(resp.content)) as z:
+                for filename in z.namelist():
+                    if filename.endswith(".xml") or filename.endswith(".html"):
+                        text_content += z.read(filename).decode("utf-8", errors="ignore")
+
+            # 1. 사채의 권면(전자등록)총액 추출
+            amount_match = re.search(r"(?:권면총액|전자등록총액|발행금액)[^\d]{1,30}([\d,]{5,20})\s*(?:원)?", text_content)
+            extracted_amount = 0
+            if amount_match:
+                extracted_amount = int(amount_match.group(1).replace(",", ""))
+
+            # 2. 전환가액 / 행사가액 추출
+            conv_price_match = re.search(r"(?:전환가액|행사가액|발행가액)[^\d]{1,25}([\d,]{3,10})\s*원", text_content)
+            extracted_conv_price = "공시 참조"
+            if conv_price_match:
+                extracted_conv_price = f"{conv_price_match.group(1)}원"
+
+            # 3. 최저 조정가액 (리픽싱 하한선 비율 - 보통 70%)
+            refix_match = re.search(r"최저\s*(?:조정가액|발행가액)[^\d]{1,30}([\d,]{3,10})\s*원", text_content)
+            refix_ratio_match = re.search(r"(?:조정가액은|하한선은)[^\d]{1,20}(\d{2})%\s*이상", text_content)
+            refix_str = "최대 70% 하향 리픽싱 가능"
+            if refix_match:
+                refix_str = f"최저 조정가액: {refix_match.group(1)}원"
+            elif refix_ratio_match:
+                refix_str = f"최저 리픽싱 하한선: {refix_ratio_match.group(1)}%"
+
+            return {
+                "rcept_no": rcept_no,
+                "parsed_amount": extracted_amount,
+                "conv_price": extracted_conv_price,
+                "refixing_floor": refix_str
+            }
+        except Exception as e:
+            print(f"[DartCollector] 본문 정밀 파싱 오류 ({rcept_no}): {e}")
+            return {}
+
+    def fetch_financial_statements(self, stock_name: str, year: int = None) -> List[Dict[str, Any]]:
+        """표준 재무제표(BS/IS) 수집"""
+        corp_code = self.get_corp_code(stock_name)
+        if not corp_code:
             return []
 
-        corp_code = self.corp_code_map[resolved]
-        current_year = datetime.now().year - 1
+        if not year:
+            year = datetime.now().year - 1
 
-        url = "https://opendart.fss.or.kr/api/fnlttSinglAcnt.json"
+        self._throttle()
+        url = f"{DART_BASE_URL}/fnlttSinglAcntAll.json"
         params = {
             "crtfc_key": self.api_key,
             "corp_code": corp_code,
-            "bsns_year": str(current_year),
-            "reprt_code": "11011"
+            "bsns_year": str(year),
+            "reprt_code": "11011",  # 사업보고서
+            "fs_div": "CFS"         # 연결재무제표 우선
         }
 
         try:
-            res = requests.get(url, params=params, timeout=6)
-            data = res.json()
-            if data.get("status") != "000":
-                params["bsns_year"] = str(current_year - 1)
-                res = requests.get(url, params=params, timeout=6)
-                data = res.json()
-
-            if data.get("status") == "000" and "list" in data:
-                return data["list"]
+            resp = requests.get(url, params=params, timeout=12)
+            data = resp.json()
+            if data.get("status") == "000":
+                return data.get("list", [])
+            elif data.get("status") == "013":
+                # 연결이 없는 경우 개별(OFS)로 재조회
+                params["fs_div"] = "OFS"
+                self._throttle()
+                resp2 = requests.get(url, params=params, timeout=12)
+                data2 = resp2.json()
+                if data2.get("status") == "000":
+                    return data2.get("list", [])
         except Exception as e:
-            print(f"[DART] 재무제표 수집 실패: {e}")
-
+            print(f"[DartCollector] 재무제표 수집 실패: {e}")
         return []
