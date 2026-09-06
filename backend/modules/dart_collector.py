@@ -4,10 +4,10 @@
 - 파일명: backend/modules/dart_collector.py
 - 프로젝트: Financial Multi-Risk Guardian
 - 주요 역할:
-    1. Open DART API 연동 및 고유번호(corp_code) 매핑 관리
+    1. Open DART API 연동 및 고유번호(corp_code) 매핑 관리 (자동 정규화 및 유사도 매칭 적용)
     2. 최근 공시 목록 및 표준 재무제표(BS/IS) 수집
     3. [1순위 고도화] 전환사채(CB) / 신주인수권부사채(BW) / 유상증자 공시의
-       본문 원문 XML/HTML 파싱을 통한 실제 권면총액, 전환가액, 리픽싱 최저한도 추출
+        본문 원문 XML/HTML 파싱을 통한 실제 권면총액, 전환가액, 리픽싱 최저한도 추출
     4. [Rate Limiting] DART API 호출 간 최소 지연(Throttle) 보장으로 429 차단
 ==============================================================================
 """
@@ -16,8 +16,10 @@ import os
 import re
 import io
 import time
+import json
 import zipfile
 import requests
+import difflib
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
@@ -54,50 +56,85 @@ class DartCollector:
         self.last_call_time = time.time()
 
     def _load_corp_codes(self):
-        """DART 전체 고유번호 목록(CORPCODE.zip) 다운로드 및 인메모리 색인 (1회 수행)"""
+        """DART 전체 고유번호 목록(CORPCODE.zip) 다운로드 및 정규화 인메모리 색인 (1회 수행)"""
         if not self.api_key:
             return
 
         cache_file = "data/corp_codes.json"
+        raw_dict = {}
+
         if os.path.exists(cache_file):
             try:
-                import json
                 with open(cache_file, "r", encoding="utf-8") as f:
-                    self.corp_code_cache = json.load(f)
-                return
+                    raw_dict = json.load(f)
             except Exception:
                 pass
 
-        try:
-            self._throttle()
-            url = f"{DART_BASE_URL}/corpCode.xml"
-            resp = requests.get(url, params={"crtfc_key": self.api_key}, timeout=30)
-            if resp.status_code == 200 and resp.content[:2] == b"PK":
-                with zipfile.ZipFile(io.BytesIO(resp.content)) as z:
-                    xml_content = z.read("CORPCODE.xml")
-                    root = ET.fromstring(xml_content)
-                    for item in root.findall("list"):
-                        corp_name = item.findtext("corp_name", "").strip()
-                        corp_code = item.findtext("corp_code", "").strip()
-                        if corp_name and corp_code:
-                            self.corp_code_cache[corp_name] = corp_code
+        if not raw_dict:
+            try:
+                self._throttle()
+                url = f"{DART_BASE_URL}/corpCode.xml"
+                resp = requests.get(url, params={"crtfc_key": self.api_key}, timeout=30)
+                if resp.status_code == 200 and resp.content[:2] == b"PK":
+                    with zipfile.ZipFile(io.BytesIO(resp.content)) as z:
+                        xml_content = z.read("CORPCODE.xml")
+                        root = ET.fromstring(xml_content)
+                        for item in root.findall("list"):
+                            corp_name = item.findtext("corp_name", "").strip()
+                            corp_code = item.findtext("corp_code", "").strip()
+                            if corp_name and corp_code:
+                                raw_dict[corp_name] = corp_code
 
-                os.makedirs("data", exist_ok=True)
-                import json
-                with open(cache_file, "w", encoding="utf-8") as f:
-                    json.dump(self.corp_code_cache, f, ensure_ascii=False)
-        except Exception as e:
-            print(f"[DartCollector] corpCode 로드 실패: {e}")
+                    os.makedirs("data", exist_ok=True)
+                    with open(cache_file, "w", encoding="utf-8") as f:
+                        json.dump(raw_dict, f, ensure_ascii=False)
+            except Exception as e:
+                print(f"[DartCollector] corpCode 로드 실패: {e}")
+
+        # [자동 정규화 매핑] 대소문자 무시, 공백 및 특수문자 제거한 키값으로 인덱싱
+        self.corp_code_cache = {}
+        for corp_name, corp_code in raw_dict.items():
+            clean_name = re.sub(r'[^가-힣a-z0-9]', '', corp_name.strip().lower())
+            if clean_name:
+                self.corp_code_cache[clean_name] = corp_code
+            # 원본 이름도 추가 보존
+            self.corp_code_cache[corp_name.strip().lower()] = corp_code
 
     def get_corp_code(self, stock_name: str) -> Optional[str]:
-        """기업명에 대응하는 DART 8자리 고유번호 조회"""
-        return self.corp_code_cache.get(stock_name.strip())
+        """기업명에 대응하는 DART 8자리 고유번호 조회 (자동 유사도 및 정규화 매칭)"""
+        if not stock_name:
+            return None
+            
+        clean_key = re.sub(r'[^가-힣a-z0-9]', '', stock_name.strip().lower())
+        
+        # 1. 정규화된 정확한 키가 존재하면 바로 반환
+        if clean_key in self.corp_code_cache:
+            return self.corp_code_cache[clean_key]
+            
+        original_lower = stock_name.strip().lower()
+        if original_lower in self.corp_code_cache:
+            return self.corp_code_cache[original_lower]
+
+        all_keys = list(self.corp_code_cache.keys())
+
+        # 2. 부분 일치 검색 (예: '하이닉스' 입력 시 'sk하이닉스' 탐색)
+        matching_keys = [k for k in all_keys if clean_key in k or k in clean_key]
+        if matching_keys:
+            best_match = min(matching_keys, key=len)
+            return self.corp_code_cache[best_match]
+
+        # 3. 오타나 축약어 대응 유사도 검사 (difflib)
+        close_matches = difflib.get_close_matches(clean_key, all_keys, n=1, cutoff=0.5)
+        if close_matches:
+            return self.corp_code_cache[close_matches[0]]
+
+        return None
 
     def is_valid_company(self, stock_name: str) -> bool:
-        """DART에 등록된 유효 상장사 여부 검증"""
+        """DART에 등록된 유효 상장사 여부 검증 (유연한 퍼지 매칭 적용)"""
         if not self.corp_code_cache:
             return True
-        return stock_name.strip() in self.corp_code_cache
+        return self.get_corp_code(stock_name) is not None
 
     def fetch_recent_disclosures(self, stock_name: str, count: int = 10) -> List[Dict[str, Any]]:
         """

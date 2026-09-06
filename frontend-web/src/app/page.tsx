@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import axios from "axios";
 import Link from "next/link";
 import { 
@@ -42,7 +42,12 @@ import {
   ChevronRight,
   ArrowRightLeft,
   Clock,
-  KeyRound
+  KeyRound,
+  MessageCircle,
+  Newspaper,
+  ArrowDownRight,
+  BarChart3,
+  Globe2
 } from "lucide-react";
 import {
   Radar,
@@ -53,9 +58,10 @@ import {
   ResponsiveContainer
 } from "recharts";
 
-const API_BASE = typeof window !== "undefined" ? "/api" : "http://localhost:8000/api";
+import PortfolioScannerModal from "../components/PortfolioScannerModal";
 
-// JWT Access Token 자동 주입 인터셉터
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000/api";
+
 if (typeof window !== "undefined") {
   axios.interceptors.request.use((config) => {
     const token = localStorage.getItem("access_token");
@@ -79,6 +85,11 @@ interface ToastInfo {
   type: "success" | "error" | "info";
 }
 
+interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
 export default function Home() {
   const [currentUser, setCurrentUser] = useState<string>("");
   const [currentNickname, setCurrentNickname] = useState<string>("");
@@ -89,7 +100,6 @@ export default function Home() {
   const [authPw, setAuthPw] = useState("");
   const [authMsg, setAuthMsg] = useState("");
 
-  // 계정 찾기 모달 상태
   const [isAccountRecoveryOpen, setIsAccountRecoveryOpen] = useState(false);
   const [recoveryTab, setRecoveryTab] = useState<"findId" | "resetPw">("findId");
   const [recoveryEmail, setRecoveryEmail] = useState("");
@@ -111,11 +121,15 @@ export default function Home() {
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [showDeepDive, setShowDeepDive] = useState<boolean>(false);
 
+  // 구형 OCR 모달 상태
   const [isOcrModalOpen, setIsOcrModalOpen] = useState<boolean>(false);
   const [ocrLoading, setOcrLoading] = useState<boolean>(false);
   const [detectedStocks, setDetectedStocks] = useState<string[]>([]);
   const [selectedStocks, setSelectedStocks] = useState<string[]>([]);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
+
+  // 신규 원스톱 포트폴리오 헬스케어 진단 모달 상태
+  const [isPortfolioScannerOpen, setIsPortfolioScannerOpen] = useState<boolean>(false);
 
   const [activeTab, setActiveTab] = useState<"analyze" | "watchlist" | "inquiry" | "admin">("analyze");
 
@@ -130,6 +144,23 @@ export default function Home() {
   const [addingStock, setAddingStock] = useState(false);
 
   const [toast, setToast] = useState<ToastInfo | null>(null);
+
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [chatInput, setChatInput] = useState("");
+  const [chatLoading, setChatLoading] = useState(false);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
+    {
+      role: "assistant",
+      content: "안녕하세요! Guardian Copilot입니다. 현재 종목의 공시 지뢰, 메자닌(CB/BW) 물량 출회, 재무 리스크에 대해 무엇이든 질문하세요."
+    }
+  ]);
+  const chatMessagesEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (isChatOpen) {
+      chatMessagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [chatMessages, isChatOpen]);
 
   const showToast = (message: string, type: "success" | "error" | "info" = "info") => {
     setToast({ message, type });
@@ -196,7 +227,6 @@ export default function Home() {
     }
   };
 
-  // 아이디 찾기 요청
   const handleFindId = async (e: React.FormEvent) => {
     e.preventDefault();
     setRecoveryResultMsg(null);
@@ -215,7 +245,6 @@ export default function Home() {
     }
   };
 
-  // 비밀번호 재설정 요청
   const handleResetPassword = async (e: React.FormEvent) => {
     e.preventDefault();
     setRecoveryResultMsg(null);
@@ -516,6 +545,35 @@ export default function Home() {
     }
   };
 
+  const handleSendChatMessage = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!chatInput.trim() || chatLoading) return;
+
+    const userQ = chatInput.trim();
+    setChatInput("");
+    setChatMessages((prev) => [...prev, { role: "user", content: userQ }]);
+    setChatLoading(true);
+
+    try {
+      const res = await axios.post(`${API_BASE}/chat/ask`, {
+        stock_name: searchStock || "전체",
+        question: userQ,
+        context_summary: analysisResult ? analysisResult.report_text : ""
+      });
+      setChatMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: res.data.answer || "답변을 수신하지 못했습니다." }
+      ]);
+    } catch (err) {
+      setChatMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: "일시적인 서버 지연으로 답변을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요." }
+      ]);
+    } finally {
+      setChatLoading(false);
+    }
+  };
+
   const isElevatedUser = userRole === "master" || userRole === "admin";
 
   const getRiskScore = (key: string) => {
@@ -529,8 +587,7 @@ export default function Home() {
   const dangerCount = watchlist.filter(item => item.score < 45).length;
 
   return (
-    <div className="min-h-screen flex flex-col bg-slate-50 relative">
-      {/* 🔔 플로팅 토스트 알림 */}
+    <div className="min-h-screen flex flex-col bg-slate-50 relative pb-16">
       {toast && (
         <div className="fixed top-20 right-6 z-50 animate-in fade-in slide-in-from-top-3 duration-300">
           <div className={`px-4 py-3 rounded-2xl shadow-xl flex items-center gap-2.5 text-xs font-bold border backdrop-blur-md ${
@@ -546,7 +603,6 @@ export default function Home() {
         </div>
       )}
 
-      {/* 1. 상단 내비게이션 바 */}
       <header className="sticky top-0 z-30 bg-white/80 backdrop-blur border-b border-slate-200 px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <div className="bg-emerald-500 text-white p-2 rounded-xl shadow-sm">
@@ -590,7 +646,6 @@ export default function Home() {
         </div>
       </header>
 
-      {/* 2. 메인 컨텐츠 영역 */}
       <main className="flex-1 max-w-6xl w-full mx-auto p-6">
         <div className="flex gap-2 border-b border-slate-200 mb-6">
           <button
@@ -644,14 +699,12 @@ export default function Home() {
           )}
         </div>
 
-        {/* [탭 1: 단일 종목 다차원 정밀 진단] */}
         {activeTab === "analyze" && (
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 items-start">
             <div className="space-y-6">
               <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-col gap-4">
                 <h2 className="text-base font-bold text-slate-800">종목 리스크 스캔</h2>
                 
-                {/* 종목 검색창 */}
                 <div className="flex gap-2">
                   <input
                     type="text"
@@ -662,7 +715,7 @@ export default function Home() {
                         handleAnalyze();
                       }
                     }}
-                    placeholder="예: 노루페인트, 한화, 카카오"
+                    placeholder="예: 고려아연, 삼성전자, 카카오"
                     disabled={analyzing}
                     className="flex-1 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-emerald-500 disabled:bg-slate-100"
                   />
@@ -676,16 +729,15 @@ export default function Home() {
                   </button>
                 </div>
 
-                {/* ⚡ 심사위원 원클릭 빠른 시연 프리셋 바 */}
                 <div className="flex flex-wrap items-center gap-1.5 pt-1 text-xs">
                   <span className="text-[11px] text-slate-400 font-bold">⚡ 시연 프리셋:</span>
                   <button
                     type="button"
-                    onClick={() => { setSearchStock("파두"); executeAnalysis("파두"); }}
+                    onClick={() => { setSearchStock("고려아연"); executeAnalysis("고려아연"); }}
                     disabled={analyzing}
-                    className="px-2 py-0.5 rounded-md bg-rose-50 hover:bg-rose-100 text-rose-600 font-bold border border-rose-200 transition cursor-pointer text-[11px]"
+                    className="px-2 py-0.5 rounded-md bg-purple-50 hover:bg-purple-100 text-purple-700 font-bold border border-purple-200 transition cursor-pointer text-[11px]"
                   >
-                    🔴 고위험 (파두)
+                    👑 경영권분쟁 (고려아연)
                   </button>
                   <button
                     type="button"
@@ -726,7 +778,7 @@ export default function Home() {
                 <div className="bg-slate-50 p-4 rounded-xl text-xs text-slate-600 space-y-2 border border-slate-100">
                   <p className="font-bold text-slate-700">💡 3초 만에 끝내는 투자 판단:</p>
                   <p>• <b>스마트 캐시:</b> 공유 DB 캐시로 0.01초 초고속 조회</p>
-                  <p>• <b>HF KR-FinBERT:</b> 공시·뉴스 감성 지표 분석</p>
+                  <p>• <b>9대 리스크:</b> 공시·재무·수급·미디어·어닝·환율 동시 분석</p>
                   <p>• <b>시나리오 예측:</b> Gemini AI 기반 3~6개월 전망</p>
                 </div>
               </div>
@@ -734,23 +786,23 @@ export default function Home() {
               {analysisResult && (
                 <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col items-center animate-in fade-in duration-300">
                   <div className="w-full flex items-center justify-between mb-1">
-                    <h4 className="text-xs font-bold text-slate-700">다차원 리스크 지형도 (Radar Map)</h4>
+                    <h4 className="text-xs font-bold text-slate-700">9대 다차원 리스크 지형도 (Radar Map)</h4>
                     <span className="text-[10px] text-slate-400">외곽일수록 위험</span>
                   </div>
                   
-                  <div className="w-full h-64">
+                  <div className="w-full h-72">
                     <ResponsiveContainer width="100%" height="100%">
                       <RadarChart 
                         data={analysisResult.radar_data} 
                         cx="50%" 
                         cy="50%" 
-                        outerRadius="50%"
-                        margin={{ top: 15, right: 45, bottom: 15, left: 45 }}
+                        outerRadius="65%"
+                        margin={{ top: 20, right: 30, bottom: 20, left: 30 }}
                       >
                         <PolarGrid stroke="#e2e8f0" />
                         <PolarAngleAxis 
                           dataKey="theta" 
-                          tick={{ fill: "#334155", fontSize: 11, fontWeight: 700 }} 
+                          tick={{ fill: "#334155", fontSize: 9, fontWeight: 700 }} 
                         />
                         <PolarRadiusAxis domain={[0, 100]} tick={false} axisLine={false} />
                         <Radar 
@@ -765,7 +817,7 @@ export default function Home() {
                   </div>
 
                   <p className="text-[11px] text-slate-400 text-center leading-tight">
-                    5대 리스크 축의 수치가 중심(0)에 가까울수록 안전합니다.
+                    9대 리스크 축의 수치가 중심(0)에 가까울수록 안전합니다.
                   </p>
                 </div>
               )}
@@ -847,9 +899,180 @@ export default function Home() {
                     </div>
                   )}
 
-                  {/* 우선주 비교 캐러셀 */}
+                  {/* 📰 실시간 연관 뉴스룸 & 원문 검증 카드 */}
+                  {analysisResult?.news_risk?.top_headlines && analysisResult.news_risk.top_headlines.length > 0 && (
+                    <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+                      <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                        <div className="flex items-center gap-2">
+                          <div className="p-2 bg-blue-50 text-blue-600 rounded-xl">
+                            <Newspaper className="w-4 h-4" />
+                          </div>
+                          <div>
+                            <h4 className="font-bold text-sm text-slate-900">실시간 연관 뉴스룸 & 원문 검증</h4>
+                            <p className="text-[11px] text-slate-500">AI 리스크 소견의 근거가 되는 실시간 뉴스 기사를 직접 확인하세요.</p>
+                          </div>
+                        </div>
+                        <span className="text-xs font-bold bg-slate-100 text-slate-600 px-2.5 py-1 rounded-full">
+                          총 {analysisResult.news_risk.top_headlines.length}건
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        {analysisResult.news_risk.top_headlines.map((news: any, idx: number) => (
+                          <a
+                            key={idx}
+                            href={news.url || news.link}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="p-4 rounded-2xl border border-slate-200/80 hover:border-emerald-400 bg-slate-50/50 hover:bg-emerald-50/20 transition flex flex-col justify-between group cursor-pointer"
+                          >
+                            <div className="space-y-2">
+                              <div className="flex items-center justify-between">
+                                <span className="text-[10px] font-bold text-slate-500 bg-slate-200/60 px-2 py-0.5 rounded-md">
+                                  {news.press || "언론사"}
+                                </span>
+                                <div className="flex items-center gap-1.5">
+                                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                                    news.sentiment === "긍정" ? "bg-emerald-100 text-emerald-700" :
+                                    news.sentiment === "부정" ? "bg-rose-100 text-rose-700" : "bg-slate-200 text-slate-600"
+                                  }`}>
+                                    {news.sentiment || "중립"}
+                                  </span>
+                                  <span className="text-[10px] text-slate-400 font-mono">
+                                    {news.pub_date}
+                                  </span>
+                                </div>
+                              </div>
+                              <h5 className="font-bold text-xs text-slate-900 group-hover:text-emerald-700 transition leading-snug line-clamp-2">
+                                {news.title}
+                              </h5>
+                            </div>
+
+                            <div className="flex items-center justify-end gap-1 text-[11px] font-bold text-emerald-600 mt-3 pt-2 border-t border-slate-200/60">
+                              <span>기사 원문 읽기</span>
+                              <ExternalLink className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" />
+                            </div>
+                          </a>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-3">
+                    <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                      <div className="flex items-center gap-2">
+                        <Sparkles className="w-4 h-4 text-emerald-600" />
+                        <h4 className="text-xs font-bold text-slate-800">실시간 4대 선행 리스크 모니터링 (수급 · 언론 · 어닝 · 환율)</h4>
+                      </div>
+                      <span className="text-[10px] text-slate-400">실시간 크롤링 및 DART 분석 연동</span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
+                      <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 flex flex-col justify-between">
+                        <div>
+                          <div className="flex items-center justify-between mb-1.5">
+                            <span className="text-[11px] font-bold text-slate-700 flex items-center gap-1">
+                              <Newspaper className="w-3.5 h-3.5 text-blue-500" /> 미디어 노이즈
+                            </span>
+                            <span className={`text-[10px] font-extrabold px-1.5 py-0.5 rounded ${
+                              getRiskScore("미디어 노이즈") >= 50 ? "bg-rose-100 text-rose-700" : "bg-emerald-100 text-emerald-700"
+                            }`}>
+                              {getRiskScore("미디어 노이즈")}점
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-600 font-medium leading-tight">
+                            {analysisResult.news_risk?.summary_comment || "언론 노이즈 관찰 중"}
+                          </p>
+                        </div>
+                        {analysisResult.news_risk?.detected_keywords?.length > 0 && (
+                          <div className="flex flex-wrap gap-1 mt-2">
+                            {analysisResult.news_risk.detected_keywords.slice(0, 2).map((k: string, i: number) => (
+                              <span key={i} className="text-[9px] bg-rose-50 text-rose-600 font-bold px-1.5 py-0.5 rounded border border-rose-200">
+                                #{k}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 flex flex-col justify-between">
+                        <div>
+                          <div className="flex items-center justify-between mb-1.5">
+                            <span className="text-[11px] font-bold text-slate-700 flex items-center gap-1">
+                              <ArrowDownRight className="w-3.5 h-3.5 text-amber-500" /> 수급 이탈 압력
+                            </span>
+                            <span className={`text-[10px] font-extrabold px-1.5 py-0.5 rounded ${
+                              getRiskScore("수급 이탈 압력") >= 40 ? "bg-rose-100 text-rose-700" : "bg-emerald-100 text-emerald-700"
+                            }`}>
+                              {getRiskScore("수급 이탈 압력")}점
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-600 font-medium leading-tight">
+                            {analysisResult.supply_risk?.summary_comment || "메이저 수급 관찰 중"}
+                          </p>
+                        </div>
+                        {analysisResult.supply_risk && (
+                          <div className="text-[10px] text-slate-500 mt-2 flex justify-between pt-1 border-t border-slate-200/60 font-mono">
+                            <span>외인: {analysisResult.supply_risk.foreign_net_5d?.toLocaleString()}주</span>
+                            <span>기관: {analysisResult.supply_risk.inst_net_5d?.toLocaleString()}주</span>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 flex flex-col justify-between">
+                        <div>
+                          <div className="flex items-center justify-between mb-1.5">
+                            <span className="text-[11px] font-bold text-slate-700 flex items-center gap-1">
+                              <BarChart3 className="w-3.5 h-3.5 text-purple-500" /> 실적 충격도
+                            </span>
+                            <span className={`text-[10px] font-extrabold px-1.5 py-0.5 rounded ${
+                              getRiskScore("실적 충격도") >= 30 ? "bg-rose-100 text-rose-700" : "bg-emerald-100 text-emerald-700"
+                            }`}>
+                              {getRiskScore("실적 충격도")}점
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-600 font-medium leading-tight">
+                            {analysisResult.consensus_risk?.summary_comment || "DART 분기 실적 추세 정상"}
+                          </p>
+                        </div>
+                        {analysisResult.consensus_risk?.growth_rate !== undefined && (
+                          <div className="text-[10px] text-slate-500 mt-2 flex items-center justify-between pt-1 border-t border-slate-200/60 font-mono">
+                            <span>영업이익 증감:</span>
+                            <span className={`font-bold ${analysisResult.consensus_risk.growth_rate >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                              {analysisResult.consensus_risk.growth_rate >= 0 ? "+" : ""}{analysisResult.consensus_risk.growth_rate}%
+                            </span>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 flex flex-col justify-between">
+                        <div>
+                          <div className="flex items-center justify-between mb-1.5">
+                            <span className="text-[11px] font-bold text-slate-700 flex items-center gap-1">
+                              <Globe2 className="w-3.5 h-3.5 text-teal-500" /> 매크로 민감도
+                            </span>
+                            <span className={`text-[10px] font-extrabold px-1.5 py-0.5 rounded ${
+                              getRiskScore("매크로 민감도") >= 30 ? "bg-rose-100 text-rose-700" : "bg-emerald-100 text-emerald-700"
+                            }`}>
+                              {getRiskScore("매크로 민감도")}점
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-600 font-medium leading-tight">
+                            {analysisResult.macro_risk?.summary_comment || "환율/금리 변동 모니터링 중"}
+                          </p>
+                        </div>
+                        {analysisResult.macro_risk && (
+                          <div className="text-[10px] text-slate-500 mt-2 flex justify-between pt-1 border-t border-slate-200/60 font-mono">
+                            <span>섹터: {analysisResult.macro_risk.sector}</span>
+                            <span>환율: {analysisResult.macro_risk.usd_krw?.toLocaleString()}원</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
                   {analysisResult.price_info?.has_preferred_family && analysisResult.price_info?.related_pref_stocks?.length > 0 && (
-                    <div className="bg-gradient-to-br from-indigo-50/90 via-purple-50/70 to-slate-50 border border-purple-200 p-6 rounded-2xl shadow-sm space-y-4 animate-in fade-in duration-300">
+                    <div className="bg-gradient-to-br from-indigo-50/90 via-purple-50/70 to-slate-50 border border-purple-200 p-6 rounded-2xl shadow-sm space-y-4">
                       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-purple-100">
                         <div className="flex items-center gap-2.5">
                           <div className="p-2 bg-purple-600 text-white rounded-xl shadow-xs">
@@ -921,15 +1144,9 @@ export default function Home() {
                           </div>
                         ))}
                       </div>
-
-                      <div className="text-[11px] text-slate-500 bg-white/80 p-3 rounded-xl border border-purple-100 flex items-center justify-between">
-                        <span>💡 우선주는 의결권이 없는 대신 <b>높은 배당수익률과 가격 할인 혜택</b>이 주어집니다.</span>
-                        <span className="text-purple-600 font-bold hidden sm:inline">장기 배당 투자에 유리</span>
-                      </div>
                     </div>
                   )}
 
-                  {/* 감성 분석 카드 */}
                   {analysisResult.sentiment_data && (
                     <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
                       <div className="flex items-center justify-between mb-3">
@@ -948,17 +1165,14 @@ export default function Home() {
                         <div 
                           style={{ width: `${analysisResult.sentiment_data.positive_pct}%` }} 
                           className="bg-emerald-500 transition-all duration-500" 
-                          title={`긍정 ${analysisResult.sentiment_data.positive_pct}%`}
                         />
                         <div 
                           style={{ width: `${analysisResult.sentiment_data.neutral_pct}%` }} 
                           className="bg-slate-300 transition-all duration-500" 
-                          title={`중립 ${analysisResult.sentiment_data.neutral_pct}%`}
                         />
                         <div 
                           style={{ width: `${analysisResult.sentiment_data.negative_pct}%` }} 
                           className="bg-rose-500 transition-all duration-500" 
-                          title={`부정 ${analysisResult.sentiment_data.negative_pct}%`}
                         />
                       </div>
 
@@ -976,7 +1190,6 @@ export default function Home() {
                     </div>
                   )}
 
-                  {/* 시나리오 카드 */}
                   {analysisResult.forecast_scenario?.scenarios && (
                     <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
                       <div className="flex items-center justify-between mb-4">
@@ -1006,7 +1219,6 @@ export default function Home() {
                     </div>
                   )}
 
-                  {/* 3대 리스크 카드 */}
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                     <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between">
                       <div className="flex items-center gap-2 mb-2">
@@ -1054,7 +1266,6 @@ export default function Home() {
                     </div>
                   </div>
 
-                  {/* 심층 분석 아코디언 */}
                   <div className="pt-2">
                     <button
                       onClick={() => setShowDeepDive(!showDeepDive)}
@@ -1243,7 +1454,6 @@ export default function Home() {
           </div>
         )}
 
-        {/* [탭 2: 관심 종목 가디언] */}
         {activeTab === "watchlist" && (
           <div className="space-y-6">
             {!currentUser ? (
@@ -1335,13 +1545,16 @@ export default function Home() {
                     >
                       <Plus className="w-4 h-4" /> {addingStock ? "등록 중..." : "종목 추가"}
                     </button>
+                    
+                    {/* 개선된 원스톱 포트폴리오 헬스케어 OCR 모달 트리거 버튼 */}
                     <button
-                      onClick={() => setIsOcrModalOpen(true)}
-                      className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold px-3 py-2.5 rounded-xl transition flex items-center gap-1 shrink-0 cursor-pointer"
-                      title="MTS 캡처 이미지로 종목 일괄 추가"
+                      onClick={() => setIsPortfolioScannerOpen(true)}
+                      className="bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 text-xs font-bold px-3.5 py-2.5 rounded-xl transition flex items-center gap-1.5 shrink-0 cursor-pointer shadow-xs"
+                      title="MTS 잔고 캡처 이미지로 종목 추출 및 9각 리스크 진단"
                     >
-                      <Camera className="w-4 h-4 text-emerald-600" /> 스크린샷 OCR
+                      <Camera className="w-4 h-4 text-emerald-600" /> 📸 잔고 스크린샷 종합 진단
                     </button>
+
                     <button
                       onClick={() => fetchWatchlist(currentUser)}
                       disabled={watchlistLoading}
@@ -1458,7 +1671,6 @@ export default function Home() {
           </div>
         )}
 
-        {/* [탭 3: 의견 및 문의] */}
         {activeTab === "inquiry" && (
           <div className="max-w-2xl mx-auto bg-white p-8 rounded-2xl border border-slate-200 shadow-sm">
             <div className="flex items-center gap-3 mb-6">
@@ -1510,7 +1722,6 @@ export default function Home() {
           </div>
         )}
 
-        {/* [탭 4: 관리자 센터] */}
         {activeTab === "admin" && isElevatedUser && (
           <div className="space-y-8">
             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
@@ -1618,7 +1829,16 @@ export default function Home() {
         )}
       </main>
 
-      {/* 📸 OCR 모달 */}
+      {/* 포트폴리오 원스톱 정밀 진단 모달 연결 */}
+      <PortfolioScannerModal
+        isOpen={isPortfolioScannerOpen}
+        onClose={() => {
+          setIsPortfolioScannerOpen(false);
+          if (currentUser) fetchWatchlist(currentUser);
+        }}
+        userId={currentUser || "guest_user"}
+      />
+
       {isOcrModalOpen && (
         <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white w-full max-w-lg rounded-3xl p-6 shadow-2xl relative animate-in fade-in zoom-in-95 duration-200">
@@ -1722,7 +1942,6 @@ export default function Home() {
         </div>
       )}
 
-      {/* 4. 로그인 모달 */}
       {isAuthOpen && (
         <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white w-full max-w-sm rounded-3xl p-8 shadow-2xl relative animate-in fade-in zoom-in-95 duration-200">
@@ -1851,7 +2070,7 @@ export default function Home() {
                   className="w-full bg-[#FEE500] hover:bg-[#FADA0A] text-[#191919] font-bold text-sm py-3 rounded-xl flex items-center justify-center gap-2 shadow-xs transition mb-3 cursor-pointer"
                 >
                   <svg className="w-4 h-4 fill-current" viewBox="0 0 24 24">
-                    <path d="M12 3C6.5 3 2 6.6 2 11c0 2.8 1.9 5.3 4.8 6.7-.2.8-.8 3.1-.9 3.6 0 .1 0 .2.1.3.1.1.2.1.3.1.2 0 2.8-1.9 4-2.7.6.1 1.1.1 1.7.1 5.5 0 10-3.6 10-8s-4.5-8-10-8z"/>
+                    <path d="M12 3C6.5 3 2 6.6 2 11c0 2.8 1.9 5.3 4.8 6.7-.2.8-.8 3.1-.9 3.6 0 .1 0 .2.1.3.1.1.2.1.3.1.1.2 0 2.8-1.9 4-2.7.6.1 1.1.1 1.7.1 5.5 0 10-3.6 10-8s-4.5-8-10-8z"/>
                   </svg>
                   카카오로 시작하기
                 </button>
@@ -1907,7 +2126,6 @@ export default function Home() {
                   </button>
                 </form>
 
-                {/* 🔗 [신규] 아이디/비밀번호 찾기 & 회원가입 버튼 영역 */}
                 <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
                   <button
                     type="button"
@@ -1935,7 +2153,6 @@ export default function Home() {
         </div>
       )}
 
-      {/* 🔑 [신규] 아이디 / 비밀번호 찾기 모달 */}
       {isAccountRecoveryOpen && (
         <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white w-full max-w-sm rounded-3xl p-6 shadow-2xl relative animate-in fade-in zoom-in-95 duration-200">
@@ -1959,7 +2176,6 @@ export default function Home() {
               </div>
             </div>
 
-            {/* 탭 버튼 */}
             <div className="flex border-b border-slate-200 mb-4 text-xs font-bold">
               <button
                 type="button"
@@ -2089,7 +2305,6 @@ export default function Home() {
         </div>
       )}
 
-      {/* 5. DART 공시 AI 요약 팝업 */}
       {summaryModal && (
         <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white w-full max-w-lg rounded-3xl p-6 shadow-2xl relative animate-in fade-in zoom-in-95 duration-200">
@@ -2167,7 +2382,6 @@ export default function Home() {
         </div>
       )}
 
-      {/* 6. 약관 모달 */}
       {modalType && (
         <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white w-full max-w-lg rounded-3xl p-6 shadow-2xl relative animate-in fade-in zoom-in-95 duration-200 max-h-[85vh] flex flex-col">
@@ -2207,6 +2421,89 @@ export default function Home() {
           </div>
         </div>
       )}
+
+      <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end">
+        {isChatOpen && (
+          <div className="w-80 sm:w-96 h-[460px] bg-white rounded-3xl border border-slate-200 shadow-2xl flex flex-col overflow-hidden mb-3 animate-in fade-in slide-from-bottom-5 duration-200">
+            <div className="bg-slate-900 text-white p-4 flex items-center justify-between shadow-xs">
+              <div className="flex items-center gap-2">
+                <div className="p-1.5 rounded-xl bg-emerald-500 text-white">
+                  <Bot className="w-4 h-4" />
+                </div>
+                <div>
+                  <h4 className="text-xs font-black flex items-center gap-1">
+                    Guardian Copilot <Sparkles className="w-3 h-3 text-amber-400" />
+                  </h4>
+                  <p className="text-[10px] text-slate-400 font-medium">
+                    분석 타깃: <b className="text-emerald-400">{searchStock || "전체 종목"}</b>
+                  </p>
+                </div>
+              </div>
+              <button 
+                onClick={() => setIsChatOpen(false)} 
+                className="text-slate-400 hover:text-white p-1 transition cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-4 space-y-3 text-xs bg-slate-50/50">
+              {chatMessages.map((m, idx) => (
+                <div key={idx} className={`flex gap-2 ${m.role === "user" ? "justify-end" : "justify-start"}`}>
+                  {m.role === "assistant" && (
+                    <div className="w-6 h-6 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0 mt-0.5 shadow-xs">
+                      <Bot className="w-3.5 h-3.5" />
+                    </div>
+                  )}
+                  <div className={`p-3 rounded-2xl max-w-[82%] leading-relaxed whitespace-pre-wrap ${
+                    m.role === "user" 
+                      ? "bg-emerald-600 text-white rounded-br-none shadow-xs font-medium" 
+                      : "bg-white border border-slate-200 text-slate-800 rounded-bl-none shadow-xs"
+                  }`}>
+                    {m.content}
+                  </div>
+                </div>
+              ))}
+              {chatLoading && (
+                <div className="text-slate-400 text-[11px] flex items-center gap-1 pl-8">
+                  <span className="inline-block w-1.5 h-1.5 bg-emerald-500 rounded-full animate-bounce"></span>
+                  <span className="inline-block w-1.5 h-1.5 bg-emerald-500 rounded-full animate-bounce delay-100"></span>
+                  <span className="inline-block w-1.5 h-1.5 bg-emerald-500 rounded-full animate-bounce delay-200"></span>
+                  <span className="text-[10px] text-slate-400 ml-1">공시 문맥 분석 중...</span>
+                </div>
+              )}
+              <div ref={chatMessagesEndRef} />
+            </div>
+
+            <form onSubmit={handleSendChatMessage} className="p-2.5 bg-white border-t border-slate-200 flex items-center gap-2">
+              <input
+                type="text"
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                placeholder={`${searchStock || "종목"} 리스크 질문 입력...`}
+                disabled={chatLoading}
+                className="flex-1 bg-slate-100 border border-slate-200 rounded-xl px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-emerald-500 disabled:bg-slate-200"
+              />
+              <button
+                type="submit"
+                disabled={chatLoading || !chatInput.trim()}
+                className="p-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white rounded-xl transition cursor-pointer shrink-0"
+              >
+                <Send className="w-3.5 h-3.5" />
+              </button>
+            </form>
+          </div>
+        )}
+
+        <button
+          onClick={() => setIsChatOpen(!isChatOpen)}
+          className="h-13 w-13 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white shadow-xl flex items-center justify-center transition-all transform hover:scale-105 active:scale-95 cursor-pointer ring-4 ring-emerald-500/20"
+          aria-label="AI 챗봇 열기"
+          title="Guardian Copilot AI 상담"
+        >
+          {isChatOpen ? <X className="w-6 h-6" /> : <MessageCircle className="w-6 h-6" />}
+        </button>
+      </div>
     </div>
   );
 }

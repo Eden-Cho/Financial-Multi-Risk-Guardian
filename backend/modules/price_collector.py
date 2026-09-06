@@ -1,189 +1,154 @@
-import os
-import re
-import json
-import requests
-from concurrent.futures import ThreadPoolExecutor
+"""
+==============================================================================
+[Module Overview]
+- 파일명: backend/modules/price_collector.py
+- 기능:
+    1. FinanceDataReader를 이용해 한국거래소(KRX) 전 종목 리스트 연동
+    2. 컬럼명 변동에 안전한 동적 티커 탐색 로직 적용
+    3. 실시간 주가(OHLCV) 및 등락률 조회
+==============================================================================
+"""
+
+import FinanceDataReader as fdr
+import pandas as pd
+from typing import Dict, Any
 
 class StockPriceCollector:
-    """네이버 금융 API 기반 병렬 우선주 탐색 및 실시간 시세 수집기"""
     def __init__(self):
-        self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer": "https://finance.naver.com"
+        try:
+            self.krx_stocks = fdr.StockListing('KRX')
+        except Exception as e:
+            print(f"[PriceCollector 경고] KRX 종목 리스트 로드 실패: {e}")
+            self.krx_stocks = pd.DataFrame()
+
+    def fetch_price_info(self, stock_name: str) -> Dict[str, Any]:
+        clean_name = stock_name.strip()
+        ticker = "005930"  # 기본값 삼성전자
+
+        # 수동 폴백 매핑 먼저 확인
+        fallback_map = {
+            # 대형 IT / 반도체
+            "삼성전자": "005930",
+            "SK하이닉스": "000660",
+            "삼성전자우": "005935",
+            "삼성전기": "009150",
+            
+            # 자동차 / 중공업 / 방산
+            "현대차": "005380",
+            "기아": "000270",
+            "현대모비스": "012330",
+            "HD현대중공업": "329180",
+            "한화에어로스페이스": "012450",
+            "두산에너빌리티": "034020",
+            
+            # 플랫폼 / IT 서비스
+            "카카오": "035720",
+            "NAVER": "035420",
+            "SK스퀘어": "402340",
+            
+            # 2차전지 / 에너지 / 소재
+            "LG에너지솔루션": "373220",
+            "삼성SDI": "006400",
+            "에코프로": "086520",
+            "에코프로비엠": "247540",
+            "고려아연": "010130",
+            "POSCO홀딩스": "005490",
+            
+            # 바이오 / 제약
+            "삼성바이오로직스": "207940",
+            "셀트리온": "068270",
+            "알테오젠": "196170",
+            
+            # 금융 / 지주사
+            "KB금융": "105560",
+            "신한지주": "055550",
+            "하나금융지주": "086790",
+            "메리츠금융지주": "138040",
+            "삼성물산": "028260",
+            "삼성생명": "032830",
+            "SK": "034730",
+            
+            # 기타 주요 관심 / 시연 종목
+            "파두": "440110",
+            "모아데이타": "288980",
+            "노루페인트": "090350",
+            "한화": "000880",
+            "풍산": "103140",
+            "셀트리온제약": "068760",
+            "LG화학": "051910",
+            "HD현대": "267250",
+            "KT": "030200",
+            "SK텔레콤": "017670"
         }
-        self.code_cache = {
-            "삼성전자": "005930", "삼성전자우": "005935",
-            "현대차": "005380", "현대자동차": "005380", "현대차우": "005385", "현대차2우B": "005387", "현대차3우B": "005389"
-        }
+        
+        if clean_name in fallback_map:
+            ticker = fallback_map[clean_name]
+        elif not self.krx_stocks.empty:
+            try:
+                # 대소문자 무관하게 종목명 컬럼과 코드 컬럼 찾기
+                name_col = next((c for c in self.krx_stocks.columns if c.lower() in ['name', '종목명', 'korname']), None)
+                code_col = next((c for c in self.krx_stocks.columns if c.lower() in ['symbol', 'code', 'ticker', '종목코드']), None)
 
-    def _search_stock_code(self, name: str) -> tuple[str, str]:
-        clean = name.strip()
-        if clean in self.code_cache:
-            return self.code_cache[clean], clean
+                if name_col and code_col:
+                    match = self.krx_stocks[self.krx_stocks[name_col] == clean_name]
+                    if not match.empty:
+                        ticker = str(match.iloc[0][code_col]).zfill(6)
+                    else:
+                        match_partial = self.krx_stocks[self.krx_stocks[name_col].str.contains(clean_name, na=False)]
+                        if not match_partial.empty:
+                            ticker = str(match_partial.iloc[0][code_col]).zfill(6)
+                            clean_name = str(match_partial.iloc[0][name_col])
+            except Exception as e:
+                print(f"[PriceCollector] 티커 동적 매핑 중 예외 발생: {e}")
 
+        # 주가 데이터 수집
         try:
-            url = f"https://ac.finance.naver.com/ac?q={clean}&target=stock"
-            res = requests.get(url, headers=self.headers, timeout=2.0)
-            data = res.json()
-            if data and "items" in data and len(data["items"]) > 0:
-                for sublist in data["items"]:
-                    for item in sublist:
-                        c_code = str(item[0]).strip()
-                        c_name = str(item[1]).strip()
-                        if c_name.replace(" ", "") == clean.replace(" ", ""):
-                            self.code_cache[clean] = c_code
-                            return c_code, c_name
-                if data["items"][0]:
-                    c_code = str(data["items"][0][0][0]).strip()
-                    c_name = str(data["items"][0][0][1]).strip()
-                    self.code_cache[clean] = c_code
-                    return c_code, c_name
-        except Exception:
-            pass
+            df = fdr.DataReader(ticker)
+            if df.empty:
+                raise ValueError("시세 데이터가 비어 있습니다.")
 
-        return "", clean
+            latest = df.iloc[-1]
+            prev = df.iloc[-2] if len(df) > 1 else latest
 
-    def _fetch_single_price(self, code: str) -> dict:
-        if not code or code == "000000":
-            return {"now": 0, "diff": 0, "rate": 0.0}
+            current_price = int(latest['Close'])
+            prev_price = int(prev['Close'])
+            diff = current_price - prev_price
+            change_pct = round((diff / prev_price) * 100, 2) if prev_price != 0 else 0.0
 
-        try:
-            url_summary = f"https://api.finance.naver.com/service/itemSummary.nhn?itemcode={code}"
-            res = requests.get(url_summary, headers=self.headers, timeout=2.0)
-            if res.status_code == 200:
-                data = res.json()
-                now = int(data.get("now", 0))
-                diff = int(data.get("diff", 0))
-                rate = float(data.get("rate", 0.0))
-                if now > 0:
-                    return {"now": now, "diff": diff, "rate": rate}
-        except Exception:
-            pass
-
-        try:
-            url_m = f"https://m.stock.naver.com/api/stock/{code}/basic"
-            res_m = requests.get(url_m, headers=self.headers, timeout=2.0)
-            if res_m.status_code == 200:
-                d = res_m.json()
-                now_str = str(d.get("nowPrice", "0")).replace(",", "")
-                diff_str = str(d.get("changePrice", "0")).replace(",", "")
-                rate_str = str(d.get("fluctuationsRatio", "0.0")).replace(",", "")
-                now = int(now_str) if now_str.isdigit() else 0
-                diff = int(diff_str) if diff_str.isdigit() or (diff_str.startswith("-") and diff_str[1:].isdigit()) else 0
-                rate = float(rate_str)
-                if now > 0:
-                    return {"now": now, "diff": diff, "rate": rate}
-        except Exception:
-            pass
-
-        return {"now": 0, "diff": 0, "rate": 0.0}
-
-    def _probe_pref_candidate(self, args: tuple) -> dict | None:
-        """우선주 후보군 1건 조회 함수 (병렬 스레드용)"""
-        common_name, common_code, suffix, p_type, common_now = args
-        pref_candidate_name = f"{common_name}{suffix}"
-        p_code, p_real_name = self._search_stock_code(pref_candidate_name)
-
-        if p_code and p_code != common_code:
-            p_price_data = self._fetch_single_price(p_code)
-            p_now = p_price_data["now"]
-            p_diff = p_price_data["diff"]
-            p_rate = p_price_data["rate"]
-
-            discount_rate = 0.0
-            if common_now > 0 and p_now > 0:
-                discount_rate = round(((common_now - p_now) / common_now) * 100, 1)
-
-            p_sign = "+" if p_diff > 0 else ("-" if p_diff < 0 else "")
+            is_up = diff > 0
+            is_down = diff < 0
+            
+            if is_up:
+                change_str = f"+{diff:,}원 (+{change_pct}%)"
+            elif is_down:
+                change_str = f"{diff:,}원 ({change_pct}%)"
+            else:
+                change_str = "0원 (0.0%)"
 
             return {
-                "name": p_real_name,
-                "code": p_code,
-                "type": p_type,
-                "price": f"{p_now:,}원" if p_now > 0 else "종가 확인중",
-                "raw_price": p_now,
-                "change_str": f"{p_sign}{abs(p_diff):,}원 ({p_sign}{p_rate:.2f}%)" if p_diff != 0 else "-",
-                "is_up": p_diff > 0,
-                "is_down": p_diff < 0,
-                "discount_rate": discount_rate,
-                "discount_rate_str": f"보통주 대비 {discount_rate}% 저렴" if discount_rate > 0 else "보통주와 유사 수준",
-                "dividend_benefit": "보통주 대비 추가 배당금 지급 및 높은 시가배당률",
-                "voting_right": "의결권 없음",
-                "liquidity_note": "보통주 대비 일일 거래량 확인 필요"
+                "code": ticker,
+                "display_name": clean_name,
+                "current_price": f"{current_price:,}원",
+                "change_str": change_str,
+                "is_up": is_up,
+                "is_down": is_down,
+                "has_price": True,
+                "market_status": "실시간 거래소 시세 연동",
+                "has_preferred_family": False,
+                "related_pref_stocks": []
             }
-        return None
 
-    def fetch_price_info(self, stock_name: str) -> dict:
-        clean_name = stock_name.strip()
-        code, display_name = self._search_stock_code(clean_name)
-
-        pref_pattern = r"((\s*\(우\))|(\s*우B?)|(\s*\d*우[A-Z]?)|(\(.*?우.*?\)))$"
-        is_pref_query = bool(re.search(pref_pattern, clean_name))
-
-        common_name = re.sub(pref_pattern, "", clean_name).strip() if is_pref_query else clean_name
-        if not common_name:
-            common_name = clean_name
-        
-        common_code, _ = self._search_stock_code(common_name)
-
-        # 본체 및 대상 종목 시세 병렬 수집
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            fut_curr = executor.submit(self._fetch_single_price, code)
-            fut_common = executor.submit(self._fetch_single_price, common_code) if is_pref_query else None
-
-            curr_price_data = fut_curr.result()
-            common_price_data = fut_common.result() if fut_common else curr_price_data
-
-        now_price = curr_price_data["now"]
-        diff = curr_price_data["diff"]
-        rate = curr_price_data["rate"]
-        common_now = common_price_data["now"]
-
-        sign = "+" if diff > 0 else ("-" if diff < 0 else "")
-        price_str = f"{now_price:,}원" if now_price > 0 else "종가 확인중"
-        change_str = f"{sign}{abs(diff):,}원 ({sign}{rate:.2f}%)" if now_price > 0 else "-"
-
-        # ⚡ 7개 우선주 후보군을 동시 병렬 탐색
-        candidate_suffixes = [
-            ("우", "구형우선주"),
-            ("우B", "신형우선주"),
-            ("1우", "구형우선주"),
-            ("2우B", "신형우선주(최저배당)"),
-            ("3우B", "신형우선주"),
-            ("4우(전환)", "전환우선주"),
-            (" 우", "구형우선주")
-        ]
-
-        probe_args = [
-            (common_name, common_code, suffix, p_type, common_now)
-            for suffix, p_type in candidate_suffixes
-        ]
-
-        related_pref_stocks = []
-        found_codes = set()
-
-        with ThreadPoolExecutor(max_workers=7) as executor:
-            results = executor.map(self._probe_pref_candidate, probe_args)
-            for res in results:
-                if res and res["code"] not in found_codes:
-                    found_codes.add(res["code"])
-                    related_pref_stocks.append(res)
-
-        return {
-            "has_price": now_price > 0,
-            "code": code or common_code or "005930",
-            "display_name": display_name,
-            "is_preferred": is_pref_query,
-            "common_name": common_name,
-            "common_code": common_code,
-            "common_price": f"{common_now:,}원" if common_now > 0 else price_str,
-            "current_price": price_str,
-            "raw_price": now_price,
-            "change_str": change_str,
-            "change_rate": rate,
-            "is_up": diff > 0,
-            "is_down": diff < 0,
-            "market_status": "장마감" if (diff == 0 and rate == 0) else "실시간/직전종가",
-            "has_preferred_family": len(related_pref_stocks) > 0,
-            "related_pref_stocks": related_pref_stocks
-        }
+        except Exception as e:
+            print(f"[PriceCollector] 시세 수집 오류 ({clean_name}, 티커: {ticker}): {e}")
+            return {
+                "code": ticker,
+                "display_name": clean_name,
+                "current_price": "조회 불가",
+                "change_str": "-",
+                "is_up": False,
+                "is_down": False,
+                "has_price": False,
+                "market_status": "데이터 수집 실패",
+                "has_preferred_family": False,
+                "related_pref_stocks": []
+            }
