@@ -39,7 +39,7 @@ app.add_middleware(
 
 analyzer = RiskAnalyzer()
 dart_collector = DartCollector()
-ocr_extractor = StockOcrExtractor()
+ocr_extractor = StockOcrExtractor(dart_collector)
 
 # 간단한 비밀번호 해시 유틸리티
 def hash_password(password: str) -> str:
